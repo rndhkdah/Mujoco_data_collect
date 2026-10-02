@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+fsim/assets/generated/
+*.hdf5
+*.h5

@@ -1,0 +1,12 @@
+# Linux collection runtime (see SETUP notes in README.md).
+# robosuite 1.4.0's OSC calls mujoco.mj_fullM(model, M, data.qM): MuJoCo 3.10 changed that
+# signature and 3.11 removed qM, so mujoco must stay below 3.10. Pin the exact version in M0.
+robosuite==1.4.0
+mujoco>=3.0,<3.10
+numpy
+scipy
+h5py
+aiohttp
+opencv-python
+trimesh
+manifold3d==3.5.4

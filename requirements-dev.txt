@@ -1,0 +1,8 @@
+# Windows/Linux development: the pure-MuJoCo core (specs, parts, screw mechanism, tests).
+mujoco==3.3.7
+numpy
+scipy
+trimesh
+manifold3d==3.5.4
+h5py
+pytest
