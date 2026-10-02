@@ -7,6 +7,7 @@ places and settles the parts while holding the arm, and re-arms all managers.
 """
 from __future__ import annotations
 
+import copy
 import os
 import re
 import xml.etree.ElementTree as ET
@@ -20,6 +21,7 @@ import fsim.env.gripper  # noqa: F401  (registers FsimRobotiq2f85)
 from fsim.env.arena import FurnitureArena
 from fsim.env.gripper import menagerie_gripper_xml
 from fsim.env.objects import build_part_objects
+from fsim.geometry import mat_to_quat
 from fsim.models import names
 from fsim.models.meshes import build_task_meshes, generated_dir
 from fsim.models.parts import build_screw_equalities
@@ -84,6 +86,7 @@ class KinovaFurnitureEnv(SingleArmEnv):
         self.layout = self.task.layout
         self.phases = PhaseTracker(self.task, grasped=self.grasped)
         self._event_cursor = 0
+        self.controller_configs_arg = copy.deepcopy(controller_configs)   # JSON-safe copy for env_args
         super().__init__(
             robots=robots, env_configuration="default", controller_configs=controller_configs,
             mount_types=None, gripper_types=gripper_types, initialization_noise=initialization_noise,
@@ -176,10 +179,42 @@ class KinovaFurnitureEnv(SingleArmEnv):
     def parts_poses_W(self) -> dict[str, np.ndarray]:
         return {p: self.part_state.pose_W(p) for p in self.task.part_names}
 
+    def parts_pose_vector(self) -> np.ndarray:
+        """Part poses in the table frame W as one vector: [pos(3), quat xyzw(4)] per part."""
+        out = []
+        for p in self.task.part_names:
+            T = self.part_state.pose_W(p)
+            q = mat_to_quat(T[:3, :3])
+            out += [*T[:3, 3], q[1], q[2], q[3], q[0]]
+        return np.asarray(out, np.float32)
+
+    def eef_velocity(self) -> tuple[np.ndarray, np.ndarray]:
+        """(linear, angular) velocity of the grip site in the world frame."""
+        res = np.zeros(6)
+        mujoco.mj_objectVelocity(self.sim.model._model, self.sim.data._data, mujoco.mjtObj.mjOBJ_SITE,
+                                 self.robots[0].eef_site_id, res, 0)
+        return res[3:].copy(), res[:3].copy()
+
+    def gripper_width(self) -> float:
+        """Gap between the finger pad surfaces (m)."""
+        m, d = self.sim.model._model, self.sim.data._data
+        ids = getattr(self, "_pad_ids", None)
+        if ids is None:
+            ids = self._pad_ids = [mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, f"gripper0_{s}_pad1") for s in ("left", "right")]
+        return float(np.linalg.norm(d.geom_xpos[ids[0]] - d.geom_xpos[ids[1]]) - 2 * m.geom_size[ids[0]][1])
+
     def fsim_snapshot(self) -> dict:
         """Task state not contained in the MuJoCo state (for recording and replay)."""
         return {"screw": self.screw.snapshot(), "assembled": sorted(map(list, self.checker.assembled)),
-                "phase": self.phases.phase}
+                "phase": self.phases.phase,
+                "gripper_action": float(self.robots[0].gripper.current_action[0])}
+
+    def restore_snapshot(self, snap: dict):
+        """Re-apply task state recorded by fsim_snapshot (after restoring the MuJoCo state)."""
+        self.screw.restore(snap["screw"])
+        self.checker.assembled = {tuple(p) for p in snap.get("assembled", [])}
+        self.phases.phase = int(snap.get("phase", 0))
+        self.robots[0].gripper.current_action = np.array([snap.get("gripper_action", -1.0)])
 
     # ------------------------------------------------------------------ replay support
     def edit_model_xml(self, xml_str):
