@@ -117,7 +117,7 @@ def max_penetration(model: mujoco.MjModel, data: mujoco.MjData, bodies) -> float
 
 
 def place_and_settle(model: mujoco.MjModel, data: mujoco.MjData, state, placements, settle_steps: int = 150,
-                     tol: float = 0.0005, max_iters: int = 30) -> float:
+                     tol: float = 0.0005, max_iters: int = 30, after_step=None) -> float:
     """Place parts, push apart anything that interpenetrates, then settle.
 
     Measured layouts can overlap slightly (with the table, the fence or each other). A part that
@@ -156,4 +156,6 @@ def place_and_settle(model: mujoco.MjModel, data: mujoco.MjData, state, placemen
     remaining = max_penetration(model, data, state.body_id.values())
     for _ in range(settle_steps):
         mujoco.mj_step(model, data)
+        if after_step is not None:
+            after_step()            # e.g. hold an unactuated robot in place while the parts settle
     return remaining

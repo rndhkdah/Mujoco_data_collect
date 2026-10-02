@@ -5,3 +5,4 @@ __pycache__/
 fsim/assets/generated/
 *.hdf5
 *.h5
+fsim/assets/grippers/

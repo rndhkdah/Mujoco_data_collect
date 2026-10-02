@@ -146,9 +146,13 @@ def _screw_for_parent(task: TaskSpec, parent: str) -> ScrewSpec | None:
 
 
 def build_part_body(task: TaskSpec, spec: PartSpec, pos, quat, mesh_assets: dict[str, str] | None = None,
-                    free_joint: bool = True) -> ET.Element:
-    """MJCF <body> for one part, including hole carriages for screw parents."""
-    body = ET.Element("body", {"name": names.body(spec.name), "pos": fmt(pos), "quat": fmt(quat)})
+                    free_joint: bool = True, body_name: str | None = None) -> ET.Element:
+    """MJCF <body> for one part, including hole carriages for screw parents.
+
+    body_name overrides the root body name (robosuite object XMLs need "object", which robosuite
+    renames to "<part>_main" = names.body(part)); all other names are already globally prefixed.
+    """
+    body = ET.Element("body", {"name": body_name or names.body(spec.name), "pos": fmt(pos), "quat": fmt(quat)})
     if free_joint:
         _sub(body, "freejoint", name=names.free_joint(spec.name))
     com, mass, inertia = part_inertial(spec)
