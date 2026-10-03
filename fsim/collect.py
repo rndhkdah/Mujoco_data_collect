@@ -96,6 +96,12 @@ class Collector:
                 time.sleep(rest)
 
     @staticmethod
+    def _teleop_info(out) -> dict:
+        """Mapper state for the operator view: commanded grip-site target (pos + quat wxyz) and flags."""
+        return dict(target=np.r_[out.target_pos, mat_to_quat(out.target_R)], gripper=out.gripper,
+                    clutched=out.clutched, precision=out.precision, stale=out.stale)
+
+    @staticmethod
     def _hold_action(gripper=-1.0):
         """Zero OSC delta (holds the current pose) with the gripper command."""
         a = np.zeros(7)
@@ -120,7 +126,7 @@ class Collector:
             if out.clutched:
                 return obs
             obs, _, _, _ = self.env.step(self._hold_action())
-            self.publish("READY", obs, {})
+            self.publish("READY", obs, self._teleop_info(out))
             self._pace(t0)
         return None
 
@@ -145,8 +151,7 @@ class Collector:
             obs, reward, _, info = e.step(out.action)
             rec.mark_last(rewards=reward, dones=0, skills=int(info["skill"]), phase=info["phase"])
             events += info["screw_events"]
-            self.publish("RECORD", obs, dict(info, steps=len(rec), clutched=out.clutched, precision=out.precision,
-                                             stale=out.stale))
+            self.publish("RECORD", obs, dict(info, steps=len(rec), **self._teleop_info(out)))
             if info["success"] and (out.gripper < 0 or not cfg.require_release):
                 for _ in range(cfg.settle_capture):
                     states, states_full = self._states()

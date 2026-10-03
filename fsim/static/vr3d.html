@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Furniture Teleop 3D</title>
+<link rel="icon" href="data:,">
+<style>
+  body { background:#111; color:#eee; font-family:sans-serif; margin:0; padding:20px; }
+  .btn { font-size:26px; padding:18px 34px; margin:16px 12px 16px 0; background:#2a7; color:#fff; border:none; border-radius:12px; }
+  .btn:disabled { background:#555; }
+  #status { font-size:20px; margin:8px 0; color:#8f8; }
+  #view { width:100%; max-width:960px; border:1px solid #444; margin-top:10px; }
+  #view canvas { display:block; width:100%; height:auto; }
+  #log { white-space:pre-wrap; font-family:monospace; font-size:14px; margin-top:12px; max-height:30vh; overflow:auto; }
+  td { padding:2px 12px 2px 0; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "/static/vendor/three/three.module.js",
+               "three/addons/": "/static/vendor/three/addons/" } }
+</script>
+</head>
+<body>
+  <h2>Furniture assembly: Quest teleop (3D)</h2>
+  <button id="enterVR" class="btn" disabled>Loading scene…</button>
+  <button id="enterAR" class="btn" style="display:none">Passthrough</button>
+  <div id="status">-</div>
+  <table>
+    <tr><td><b>R grip</b> (hold)</td><td>move the gripper: it follows your hand (position + rotation)</td></tr>
+    <tr><td><b>R trigger</b> (hold)</td><td>close the gripper</td></tr>
+    <tr><td><b>A</b> (hold)</td><td>precision mode</td></tr>
+    <tr><td><b>R stick ←/→</b></td><td>twist about the gripper axis (screwing)</td></tr>
+    <tr><td><b>R stick ↑/↓</b></td><td>push / pull along the gripper axis</td></tr>
+    <tr><td><b>B</b></td><td>discard the episode (while waiting: new layout)</td></tr>
+    <tr><td><b>X</b></td><td>mark a phase</td></tr>
+    <tr><td><b>Y</b></td><td>recenter the scene in front of you</td></tr>
+    <tr><td><b>L grip</b> (hold)</td><td>drag the scene · <b>L stick</b>: ←/→ rotate, ↑/↓ zoom (not while R grip is held)</td></tr>
+  </table>
+  <div id="view"></div>
+  <div id="log"></div>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const $ = (id) => document.getElementById(id);
+const logEl = $('log'), statusEl = $('status'), btnVR = $('enterVR'), btnAR = $('enterAR');
+function log(msg){ logEl.textContent = (new Date().toLocaleTimeString() + '  ' + msg + '\n' + logEl.textContent).slice(0, 6000); }
+window.addEventListener('error', (e) => log('error: ' + e.message));
+
+const params = new URLSearchParams(location.search);
+const INTERP = params.get('interp') !== '0';     // ?interp=0: show the latest pose frame without smoothing
+// Recenter puts the workspace center this far ahead of / below the eyes (m), with the scene turned by
+// `yaw` about it: -30 deg puts the operator at the robot's right-rear, so the arm does not hide the
+// workspace (?yaw=0: straight behind the robot).
+const VIEW = { dist: 0.95, drop: 0.6, yaw: THREE.MathUtils.degToRad(parseFloat(params.get('yaw') ?? '-30')) };
+const MSG_POSES = 2, MSG_WRIST = 3, HEADER = 12; // binary frames: see fsim/vr/scene_export.py
+
+// ------------------------------------------------------------------ renderer, lights, preview camera
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.xr.enabled = true;
+renderer.xr.setFoveation(0.3);
+$('view').appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const BACKDROP = new THREE.Color(0x15171c);
+scene.background = BACKDROP;
+scene.add(new THREE.HemisphereLight(0xffffff, 0x3a3a44, 1.8));
+const sun = new THREE.DirectionalLight(0xffffff, 2.0);
+sun.position.set(0.4, 2.0, 1.2);
+scene.add(sun);
+
+const camera = new THREE.PerspectiveCamera(60, 16 / 9, 0.02, 30);   // desktop preview: standing behind the robot
+camera.position.set(0, 1.55, 0);
+camera.lookAt(0, 1.55 - VIEW.drop, -VIEW.dist);
+
+// ------------------------------------------------------------------ scene graph
+// stage: where the workspace sits in the room (anchor position, yaw, zoom).
+// root: the MuJoCo world (z up) inside the stage, shifted so the workspace center is the stage origin.
+//       robot +x (forward, away from the operator) -> -z, +y (left) -> -x, +z (up) -> +y.
+// panels: HUD and wrist camera; follow the stage anchor and the operator's gaze, not the scene's yaw or zoom.
+const stage = new THREE.Group(), root = new THREE.Group(), panels = new THREE.Group();
+let manifest = null, hud = null, wrist = null;     // set once the scene / panels exist
+scene.add(stage, panels);
+stage.add(root);
+root.matrixAutoUpdate = false;
+const ROBOT_TO_XR = new THREE.Matrix4().set(0, -1, 0, 0,  0, 0, 1, 0,  -1, 0, 0, 0,  0, 0, 0, 1);
+
+function setWorkspaceCenter(c){
+  const m = ROBOT_TO_XR.clone(), p = new THREE.Vector3(c[0], c[1], c[2]).applyMatrix4(ROBOT_TO_XR);
+  m.setPosition(-p.x, -p.y, -p.z);
+  root.matrix.copy(m);
+  root.matrixWorldNeedsUpdate = true;
+}
+
+// stage yaw = gaze (set by recenter) + yaw (the scene's turn about the anchor; left stick)
+const place = { pos: new THREE.Vector3(), gaze: 0, yaw: VIEW.yaw, scale: 1 };
+function resetPlacement(){
+  place.pos.set(0, 1.55 - VIEW.drop, -VIEW.dist); place.gaze = 0; place.yaw = VIEW.yaw; place.scale = 1;
+  applyPlacement();
+}
+function applyPlacement(){
+  stage.position.copy(place.pos); stage.rotation.set(0, place.gaze + place.yaw, 0); stage.scale.setScalar(place.scale);
+  panels.position.copy(place.pos); panels.rotation.set(0, place.gaze, 0);
+  stage.updateMatrixWorld(true); panels.updateMatrixWorld(true);
+  layoutPanels();
+}
+
+const _base = new THREE.Vector3();
+function layoutPanels(){   // HUD + wrist camera beyond the workspace, on the side away from the arm
+  if (!manifest || !manifest.robot_base || !hud) return;
+  const b = manifest.robot_base;
+  root.updateWorldMatrix(true, false);
+  panels.worldToLocal(_base.set(b[0], b[1], b[2]).applyMatrix4(root.matrixWorld));
+  const side = _base.x <= 0 ? 1 : -1;
+  hud.mesh.position.x = side * 0.25;
+  wrist.mesh.position.x = side * 0.67;
+}
+resetPlacement();
+
+const _head =new THREE.Vector3(), _fwd = new THREE.Vector3(), _hq = new THREE.Quaternion();
+function recenter(t){   // t: XRRigidTransform of the viewer
+  _head.set(t.position.x, t.position.y, t.position.z);
+  _hq.set(t.orientation.x, t.orientation.y, t.orientation.z, t.orientation.w);
+  _fwd.set(0, 0, -1).applyQuaternion(_hq);
+  _fwd.y = 0;
+  if (_fwd.lengthSq() < 1e-6) _fwd.set(0, 0, -1);
+  _fwd.normalize();
+  place.pos.copy(_head).addScaledVector(_fwd, VIEW.dist);
+  place.pos.y = _head.y - VIEW.drop;
+  place.gaze = Math.atan2(-_fwd.x, -_fwd.z);    // keeps the operator's chosen scene yaw
+  applyPlacement();
+}
+
+// ------------------------------------------------------------------ bodies from the GLB
+const srgbToLinear = (c) => c < 0.04045 ? c * 0.0773993808 : Math.pow(c * 0.9478672986 + 0.0521327014, 2.4);
+function linearizeColors(geom){   // glTF vertex colors are linear; the exporter writes sRGB bytes
+  const c = geom.getAttribute('color');
+  if (!c || geom.userData.linear) return;
+  const s = c.itemSize, out = new Float32Array(c.count * s);
+  for (let i = 0; i < c.count; i++){
+    out[i * s] = srgbToLinear(c.getX(i)); out[i * s + 1] = srgbToLinear(c.getY(i)); out[i * s + 2] = srgbToLinear(c.getZ(i));
+    if (s === 4) out[i * s + 3] = c.getW(i);
+  }
+  geom.setAttribute('color', new THREE.BufferAttribute(out, s));
+  geom.userData.linear = true;
+}
+const baseMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.65, metalness: 0.05 });
+const hiMat = baseMat.clone();
+hiMat.emissive = new THREE.Color(0x5a3a00);      // the part this task assembles (manifest.highlight)
+
+let nodes = [], nBodies = 0, frameBytes = 0;
+async function loadScene(){
+  const [man, gltf] = await Promise.all([
+    fetch('/manifest.json').then((r) => { if (!r.ok) throw new Error('manifest.json: HTTP ' + r.status); return r.json(); }),
+    new GLTFLoader().loadAsync('/scene.glb')]);
+  setWorkspaceCenter(man.workspace_center || [0, 0, 0]);
+  const hi = new Set(man.highlight || []);
+  let tris = 0;
+  nodes = man.bodies.map((b) => {
+    const obj = gltf.scene.getObjectByName(b.node);
+    if (!obj){ log('scene: missing node ' + b.node + ' (' + b.name + ')'); return null; }
+    root.add(obj);
+    obj.position.set(0, 0, 0); obj.quaternion.identity(); obj.scale.set(1, 1, 1);
+    obj.traverse((o) => {
+      if (!o.isMesh) return;
+      linearizeColors(o.geometry);
+      o.material = hi.has(b.name) ? hiMat : baseMat;
+      tris += (o.geometry.index ? o.geometry.index.count : o.geometry.attributes.position.count) / 3;
+    });
+    return obj;
+  });
+  manifest = man;
+  nBodies = man.bodies.length;
+  frameBytes = HEADER + 4 * (7 * nBodies + 7 + man.flags.length);
+  layoutPanels();
+  log(`scene: ${man.task}, ${nBodies} bodies, ${Math.round(tris / 1000)}k triangles`);
+}
+
+// ------------------------------------------------------------------ target ghost (commanded grip-site pose)
+// grip-site frame: z = approach direction (out of the palm), x = finger opening direction
+const ghost = new THREE.Group();
+ghost.visible = false;
+root.add(ghost);
+function ghostBox(w, h, d, x, y, z, color){
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d),
+                              new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.3, depthWrite: false }));
+  mesh.position.set(x, y, z);
+  ghost.add(mesh);
+  return mesh;
+}
+const ghostParts = [
+  ghostBox(0.016, 0.016, 0.06, 0, 0, -0.08, 0x8fb4ff),      // wrist stub
+  ghostBox(0.074, 0.02, 0.008, 0, 0, -0.046, 0xdddddd),     // palm
+];
+const fingerL = ghostBox(0.007, 0.02, 0.05, 0.034, 0, -0.016, 0xff7060);
+const fingerR = ghostBox(0.007, 0.02, 0.05, -0.034, 0, -0.016, 0xff7060);
+ghostParts.push(fingerL, fingerR, ghostBox(0.006, 0.006, 0.006, 0, 0, 0, 0xffffff));
+
+function updateGhost(fr){
+  const T = fr.target, F = fr.flags;     // F: clutched, precision, stale, gripper (+1 closed, -1 open)
+  const qn = T[3] * T[3] + T[4] * T[4] + T[5] * T[5] + T[6] * T[6];
+  ghost.visible = qn > 0.25 && F[2] < 0.5;
+  if (!ghost.visible) return;
+  ghost.position.set(T[0], T[1], T[2]);
+  ghost.quaternion.set(T[4], T[5], T[6], T[3]).normalize();
+  const half = F[3] > 0 ? 0.012 : 0.034;
+  fingerL.position.x = half; fingerR.position.x = -half;
+  const opacity = F[0] > 0.5 ? 0.6 : 0.22;
+  for (const m of ghostParts) m.material.opacity = opacity;
+  const fc = F[1] > 0.5 ? 0x40e0ff : 0xff7060;
+  fingerL.material.color.setHex(fc); fingerR.material.color.setHex(fc);
+}
+
+// ------------------------------------------------------------------ pose frames + interpolation
+let prev = null, cur = null, poseCount = 0, wristCount = 0, badFrames = 0;
+function onPoseFrame(buf){
+  if (!manifest) return;
+  if (buf.byteLength !== frameBytes){
+    if (badFrames++ % 200 === 0) log(`pose frame of ${buf.byteLength} B, expected ${frameBytes}: the server scene changed, reload the page`);
+    return;
+  }
+  const dv = new DataView(buf), f = new Float32Array(buf, HEADER), n7 = 7 * nBodies;
+  prev = cur;
+  cur = { seq: dv.getUint32(4, true), simTime: dv.getFloat32(8, true), t: performance.now(),
+          poses: f.subarray(0, n7), target: f.subarray(n7, n7 + 7), flags: f.subarray(n7 + 7) };
+  poseCount++;
+}
+
+const qa = new THREE.Quaternion(), qb = new THREE.Quaternion();
+function applyPoses(now){
+  if (!cur) return;
+  // Show `prev` when `cur` arrives and reach `cur` one sim step later: smooth at the headset's
+  // frame rate for one control period (50 ms) of extra latency. A reset (sim time going back) snaps.
+  let a = 1;
+  if (INTERP && prev && cur.simTime >= prev.simTime){
+    const span = Math.min(Math.max((cur.simTime - prev.simTime) * 1000, 1), 200);
+    a = Math.min(1, (now - cur.t) / span);
+  }
+  const P = cur.poses, Q = prev ? prev.poses : P;
+  for (let i = 0; i < nBodies; i++){
+    const o = nodes[i];
+    if (!o) continue;
+    const k = 7 * i;
+    if (a >= 1){
+      o.position.set(P[k], P[k + 1], P[k + 2]);
+      o.quaternion.set(P[k + 4], P[k + 5], P[k + 6], P[k + 3]);
+    } else {
+      o.position.set(Q[k] + (P[k] - Q[k]) * a, Q[k + 1] + (P[k + 1] - Q[k + 1]) * a, Q[k + 2] + (P[k + 2] - Q[k + 2]) * a);
+      qa.set(Q[k + 4], Q[k + 5], Q[k + 6], Q[k + 3]);
+      qb.set(P[k + 4], P[k + 5], P[k + 6], P[k + 3]);
+      o.quaternion.slerpQuaternions(qa, qb, a);
+    }
+  }
+  updateGhost(cur);
+}
+
+// ------------------------------------------------------------------ HUD + wrist camera panels
+function makePanel(w, h, mw, mh, x, y, z){
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d'), tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(mw, mh), new THREE.MeshBasicMaterial({ map: tex, transparent: true }));
+  mesh.position.set(x, y, z);
+  mesh.rotation.x = -0.2;                     // tilted toward the operator's eyes
+  panels.add(mesh);
+  return { canvas, ctx, tex, mesh };
+}
+hud = makePanel(1024, 384, 0.5, 0.1875, 0.25, 0.46, -0.5);
+wrist = makePanel(256, 256, 0.26, 0.26, 0.67, 0.46, -0.5);
+wrist.ctx.fillStyle = '#222'; wrist.ctx.fillRect(0, 0, 256, 256);
+wrist.ctx.fillStyle = '#888'; wrist.ctx.font = '24px sans-serif'; wrist.ctx.fillText('wrist camera', 60, 134);
+wrist.tex.needsUpdate = true;
+
+let status = {}, flashText = '', flashUntil = 0, hudKey = '';
+function onStatus(s){
+  if (s.type !== 'status') return;
+  status = s;
+  if (s.flash){ flashText = s.flash; flashUntil = performance.now() + 1500; }
+  statusEl.textContent = `${s.state}  ${s.phase_name || ''}  step ${s.steps || 0}  saved ${s.saved || 0}  ${s.flash || ''}`;
+}
+function drawHud(now){
+  const flash = now < flashUntil ? flashText : '';
+  const key = JSON.stringify([status.state, status.phase_name, status.steps, status.saved, status.clutched,
+                              status.precision, status.stale, flash, wsOpen]);
+  if (key === hudKey) return;
+  hudKey = key;
+  const { ctx, canvas } = hud, W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(12,14,18,0.8)';
+  ctx.beginPath(); ctx.roundRect(0, 0, W, H, 28); ctx.fill();
+  const state = wsOpen ? (status.state || '…') : 'NO SERVER';
+  ctx.textAlign = 'left';
+  ctx.font = 'bold 76px sans-serif';
+  ctx.fillStyle = { RECORD: '#3f3', READY: '#3cf', SAVED: '#3d3', DONE: '#ccc' }[state] || '#f55';
+  ctx.fillText(state, 36, 96);
+  ctx.font = '52px sans-serif'; ctx.fillStyle = '#ddd';
+  ctx.fillText(status.phase_name || (state === 'READY' ? 'hold R grip to start' : ''), 36, 176);
+  ctx.fillText(`step ${status.steps || 0}    saved ${status.saved || 0}`, 36, 252);
+  const tags = [];
+  if (status.clutched) tags.push(['CLUTCH', '#3f3']);
+  if (status.precision) tags.push(['PRECISION', '#4df']);
+  if (status.stale && renderer.xr.isPresenting) tags.push(['NO CONTROLLER', '#f55']);
+  let x = 36;
+  ctx.font = 'bold 44px sans-serif';
+  for (const [t, c] of tags){ ctx.fillStyle = c; ctx.fillText(t, x, 336); x += ctx.measureText(t).width + 40; }
+  if (flash){
+    ctx.textAlign = 'right'; ctx.font = 'bold 100px sans-serif';
+    ctx.fillStyle = flash === 'SAVED' ? '#3d3' : (flash === 'NEW LAYOUT' ? '#3cf' : '#f44');
+    ctx.fillText(flash, W - 36, 106);
+  }
+  hud.tex.needsUpdate = true;
+}
+
+let wristBusy = false;
+function onWrist(buf){
+  wristCount++;
+  if (wristBusy) return;
+  wristBusy = true;
+  createImageBitmap(new Blob([new Uint8Array(buf, 4)], { type: 'image/jpeg' })).then((bm) => {
+    wrist.ctx.drawImage(bm, 0, 0, wrist.canvas.width, wrist.canvas.height);
+    bm.close();
+    wrist.tex.needsUpdate = true;
+    wristBusy = false;
+  }).catch(() => { wristBusy = false; });
+}
+
+// ------------------------------------------------------------------ server connection
+let ws = null, wsOpen = false, seq = 0;
+function connect(){
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => { wsOpen = true; log('ws connected'); };
+  ws.onclose = () => { wsOpen = false; log('ws closed, retrying in 1 s'); setTimeout(connect, 1000); };
+  ws.onmessage = (ev) => {
+    if (typeof ev.data === 'string'){ try { onStatus(JSON.parse(ev.data)); } catch (e) {} return; }
+    const kind = new Uint8Array(ev.data, 0, 1)[0];
+    if (kind === MSG_POSES) onPoseFrame(ev.data);
+    else if (kind === MSG_WRIST) onWrist(ev.data);
+  };
+}
+function wsSend(obj){ if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+
+// ------------------------------------------------------------------ XR session + controllers
+const ctrlMat = new THREE.MeshStandardMaterial({ color: 0x8890a0, roughness: 0.5 });
+for (let i = 0; i < 2; i++){
+  const grip = renderer.xr.getControllerGrip(i);
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.035, 0.11), ctrlMat);
+  body.position.z = 0.01;
+  const tip = new THREE.Mesh(new THREE.SphereGeometry(0.012, 12, 8), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+  tip.position.z = -0.055;
+  grip.add(body, tip);
+  scene.add(grip);
+}
+
+async function enterXR(mode){
+  if (!navigator.xr){ log('WebXR not available in this browser'); return; }
+  let session;
+  try {
+    session = await navigator.xr.requestSession(mode, { requiredFeatures: ['local-floor'] });
+    renderer.xr.setReferenceSpaceType('local-floor');
+  } catch (e){
+    try { session = await navigator.xr.requestSession(mode); renderer.xr.setReferenceSpaceType('local'); }
+    catch (e2){ log('requestSession failed: ' + e2); return; }
+  }
+  const ar = mode === 'immersive-ar';
+  scene.background = ar ? null : BACKDROP;
+  renderer.setClearColor(0x000000, ar ? 0 : 1);
+  await renderer.xr.setSession(session);
+  needRecenter = true; drag = null; hudKey = '';
+  log(`XR session: ${mode} (${session.environmentBlendMode || '?'})`);
+  session.addEventListener('end', () => {
+    scene.background = BACKDROP; renderer.setClearColor(0x000000, 1);
+    resetPlacement(); resize(); hudKey = '';
+    log('XR session ended');
+  });
+}
+btnVR.onclick = () => enterXR('immersive-vr');
+btnAR.onclick = () => enterXR('immersive-ar');
+
+function readHand(session, frame, refSpace, hand){
+  let best = null, bestScore = -1;
+  for (const src of session.inputSources){
+    if (src.handedness !== hand) continue;
+    const gp = src.gamepad;
+    if (!gp || !gp.buttons || gp.buttons.length < 2) continue;
+    const pose = src.gripSpace ? frame.getPose(src.gripSpace, refSpace) : null;
+    const score = (pose ? 100 : 0) + gp.buttons.length + (gp.axes ? gp.axes.length : 0);
+    if (score > bestScore){ bestScore = score; best = { gp, pose }; }
+  }
+  if (!best) return null;
+  const b = best.gp.buttons, ax = best.gp.axes || [];
+  const val = (i) => b[i] ? b[i].value : 0, pressed = (i) => b[i] ? b[i].pressed : false;
+  // xr-standard: 0 trigger, 1 squeeze, 3 stick press, 4 A/X, 5 B/Y; axes 2/3 = stick x/y
+  return { pose: best.pose, trigger: val(0), grip: val(1), a: pressed(4), b: pressed(5), stick: [ax[2] || 0, ax[3] || 0] };
+}
+
+// controller grip pose (XR reference space = three.js world) -> MuJoCo world, through the stage and root
+const _inv = new THREE.Matrix4(), _p = new THREE.Vector3(), _q = new THREE.Quaternion(), _rq = new THREE.Quaternion();
+const _t = new THREE.Vector3(), _s = new THREE.Vector3();
+function poseToRobot(pose){
+  root.updateWorldMatrix(true, false);
+  root.matrixWorld.decompose(_t, _rq, _s);
+  _inv.copy(root.matrixWorld).invert();
+  const t = pose.transform;
+  _p.set(t.position.x, t.position.y, t.position.z).applyMatrix4(_inv);
+  _q.set(t.orientation.x, t.orientation.y, t.orientation.z, t.orientation.w).premultiply(_rq.invert());
+  return { pos: [_p.x, _p.y, _p.z], quat: [_q.x, _q.y, _q.z, _q.w] };
+}
+
+let needRecenter = false, prevY = false, drag = null, lastRight = null, lastLeft = null, robotPose = null;
+const _hand = new THREE.Vector3();
+function xrInput(frame, dt){
+  const session = frame.session, ref = renderer.xr.getReferenceSpace();
+  if (!ref) return;
+  const r = readHand(session, frame, ref, 'right'), l = readHand(session, frame, ref, 'left');
+  if (r) lastRight = r;
+  if (l) lastLeft = l;      // hold the last good read across a dropped frame
+  const viewer = (needRecenter || (l && l.b && !prevY)) ? frame.getViewerPose(ref) : null;
+  if (needRecenter && viewer){ recenter(viewer.transform); needRecenter = false; }
+  // Placement changes move the robot frame under a held clutch, so they wait until the R grip is released.
+  const clutching = !!lastRight && lastRight.grip > 0.5;
+  if (l && !clutching){
+    if (l.b && !prevY && viewer) recenter(viewer.transform);
+    if (Math.abs(l.stick[0]) > 0.2) place.yaw -= l.stick[0] * 1.0 * dt;
+    if (Math.abs(l.stick[1]) > 0.2) place.scale = Math.min(3, Math.max(0.4, place.scale * Math.exp(-l.stick[1] * 0.8 * dt)));
+    if (l.grip > 0.5 && l.pose){
+      _hand.set(l.pose.transform.position.x, l.pose.transform.position.y, l.pose.transform.position.z);
+      if (!drag) drag = { hand: _hand.clone(), pos: place.pos.clone() };
+      else place.pos.copy(drag.pos).add(_hand).sub(drag.hand);
+    } else drag = null;
+    applyPlacement();
+  } else if (clutching) drag = null;
+  prevY = !!(l && l.b);
+  if (!lastRight) return;
+  if (r && r.pose) robotPose = poseToRobot(r.pose);
+  if (!robotPose) return;
+  wsSend({ type: 'controller', frame: 'robot', seq: seq++, t: Date.now(),
+           right: { pos: robotPose.pos, quat: robotPose.quat, tracked: !!(r && r.pose), trigger: lastRight.trigger,
+                    grip: lastRight.grip, a: lastRight.a, b: lastRight.b, stick: lastRight.stick },
+           left: lastLeft ? { x: lastLeft.a, y: lastLeft.b, stick: lastLeft.stick } : {} });
+}
+
+// ------------------------------------------------------------------ main loop
+function resize(){
+  if (renderer.xr.isPresenting) return;
+  const w = $('view').clientWidth || 960, h = Math.round(w * 9 / 16);
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', resize);
+resize();
+
+let frames = 0, lastT = 0;
+renderer.setAnimationLoop((time, frame) => {
+  const now = performance.now(), dt = lastT ? Math.min(0.1, (now - lastT) / 1000) : 0;
+  lastT = now;
+  if (frame) xrInput(frame, dt);
+  applyPoses(now);
+  drawHud(now);
+  renderer.render(scene, camera);
+  frames++;
+});
+
+let last = { poses: 0, wrist: 0, frames: 0 };
+setInterval(() => {
+  log(`poses ${((poseCount - last.poses) / 3).toFixed(1)}/s  wrist ${((wristCount - last.wrist) / 3).toFixed(1)}/s  ` +
+      `render ${((frames - last.frames) / 3).toFixed(0)}/s  ws ${wsOpen ? 'open' : 'closed'}  xr ${renderer.xr.isPresenting ? 'on' : 'off'}`);
+  last = { poses: poseCount, wrist: wristCount, frames };
+}, 3000);
+// debugging hooks (desktop preview, or chrome://inspect on the headset)
+window.fsim = { stats: () => ({ loaded: !!manifest, bodies: nBodies, poses: poseCount, wrist: wristCount, frames, ws: wsOpen,
+                                state: status.state || null, ghost: ghost.visible }),
+                poseToRobot, place, applyPlacement };
+
+async function initXRButtons(){
+  const supported = async (m) => { try { return !!(navigator.xr && await navigator.xr.isSessionSupported(m)); } catch (e) { return false; } };
+  const [vr, ar] = await Promise.all([supported('immersive-vr'), supported('immersive-ar')]);
+  btnVR.disabled = !vr;
+  btnVR.textContent = vr ? 'Enter VR' : 'WebXR VR not available (preview only)';
+  btnAR.style.display = ar ? '' : 'none';
+}
+
+loadScene().then(() => { connect(); return initXRButtons(); })
+           .catch((e) => { log('scene load failed: ' + e); btnVR.textContent = 'Scene load failed'; });
+</script>
+</body>
+</html>

@@ -62,3 +62,61 @@ def test_websocket_roundtrip_and_disconnect_clears_controller():
             await client.close()
 
     asyncio.run(run())
+
+
+def test_3d_view_serves_scene_and_streams_pose_frames():
+    import gzip
+    from types import SimpleNamespace
+
+    import mujoco
+
+    from fsim.models.scene import build_scene_xml
+    from fsim.server import MSG_WRIST_HEADER
+    from fsim.vr.scene_export import MSG_POSES, PosePacker, export_scene, unpack_poses
+
+    async def run():
+        task = get_task("one_leg")
+        m = mujoco.MjModel.from_xml_string(build_scene_xml(task, visual_meshes=True))
+        d = mujoco.MjData(m)
+        mujoco.mj_forward(m, d)
+        shared = Shared(view="3d")
+        shared.scene_glb, shared.manifest = export_scene(m, groups=(0, 1))
+        shared.scene_glb_gz = gzip.compress(shared.scene_glb)
+        packer = PosePacker(shared.manifest)
+        env = SimpleNamespace(sim=SimpleNamespace(data=SimpleNamespace(_data=d)))
+        publish = make_publisher(shared, task, [], env, packer)
+        target = np.r_[0.1, 0.2, 0.3, 1.0, 0.0, 0.0, 0.0]
+        for _ in range(2):                       # the wrist JPEG goes out every 2nd step
+            publish("RECORD", fake_obs(), {"target": target, "gripper": 1.0, "clutched": True, "steps": 3})
+        n = len(shared.manifest["bodies"])
+        client = TestClient(TestServer(build_app(shared)))
+        await client.start_server()
+        try:
+            r = await client.get("/")
+            assert "Furniture Teleop 3D" in await r.text()
+            r = await client.get("/manifest.json")
+            assert (await r.json())["bodies"] == shared.manifest["bodies"]
+            r = await client.get("/scene.glb", headers={"Accept-Encoding": "gzip"})
+            assert r.status == 200 and (await r.read())[:4] == b"glTF"     # gzip is undone by the client
+            r = await client.get("/static/vendor/three/three.module.js")
+            assert r.status == 200 and "javascript" in r.headers["Content-Type"]
+            ws = await client.ws_connect("/ws")
+            pose = wrist = status = None
+            for _ in range(10):
+                msg = await asyncio.wait_for(ws.receive(), timeout=2.0)
+                if msg.type.name == "BINARY" and msg.data[0] == MSG_POSES:
+                    pose = unpack_poses(msg.data, n)
+                elif msg.type.name == "BINARY":
+                    wrist = msg.data
+                elif msg.type.name == "TEXT":
+                    status = json.loads(msg.data)
+                if pose is not None and wrist is not None and status is not None:
+                    break
+            assert pose["seq"] == 2 and np.allclose(pose["target"], target) and np.allclose(pose["flags"], [1, 0, 0, 1])
+            assert wrist[:4] == MSG_WRIST_HEADER and wrist[4:6] == b"\xff\xd8"
+            assert status["state"] == "RECORD" and status["clutched"] is True
+            await ws.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())

@@ -2,8 +2,11 @@
 """VR collection server (one process, like the teammate's tool).
 
 A collect thread runs the env and the episode loop (fsim.collect); aiohttp on 127.0.0.1 serves the
-WebXR page and a WebSocket: controller JSON in; JPEG panel frames + JSON status out. The Quest
-reaches it through `adb reverse tcp:<port> tcp:<port>` (see stack.sh).
+WebXR page and a WebSocket: controller JSON in; JSON status out, plus
+  --view 3d (default): body-pose frames + wrist-camera JPEGs; the page renders the scene from
+                       /scene.glb + /manifest.json (fsim.vr.scene_export, static/vr3d.html)
+  --view panel:        JPEG camera panel frames (static/panel.html)
+The Quest reaches it through `adb reverse tcp:<port> tcp:<port>` (see stack.sh).
 
     MUJOCO_GL=egl python -m fsim.server --task one_leg --randomness low --num-demos 50 --operator me
 """
@@ -11,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import gzip
 import json
 import os
 import threading
@@ -25,15 +29,22 @@ from aiohttp import web  # noqa: E402
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "static")
 PANEL_CAMERAS = ("front_image", "robot0_eye_in_hand_image", "rear_image")
+SCENE_EXCLUDE = r"^(floor|wall_)"        # robosuite arena dressing: the headset shows the room or a plain backdrop
 
 
 class Shared:
-    def __init__(self):
+    def __init__(self, view: str = "panel"):
         self.lock = threading.Lock()
+        self.view = view                   # "panel" (JPEG panel) or "3d" (pose frames + scene GLB)
         self.controller = None
         self.controller_time = 0.0
-        self.frame = None
+        self.frame = None                  # latest binary frame: JPEG panel, or pose frame in 3d mode
         self.frame_id = 0
+        self.wrist = None                  # 3d mode: wrist-camera JPEG with a 4-byte type header
+        self.wrist_id = 0
+        self.scene_glb = None
+        self.scene_glb_gz = None
+        self.manifest = None
         self.status = {"state": "STARTING"}
         self.running = True
 
@@ -52,6 +63,7 @@ class Shared:
 
 
 SHARED = web.AppKey("shared", Shared) if hasattr(web, "AppKey") else "shared"
+MSG_WRIST_HEADER = bytes([3, 0, 0, 0])      # fsim.vr.scene_export.MSG_WRIST_JPEG + padding
 
 
 def panel_frame(obs, state: str, info: dict, task_name: str, tile: int = 320) -> np.ndarray:
@@ -88,7 +100,10 @@ def panel_frame(obs, state: str, info: dict, task_name: str, tile: int = 320) ->
     return img
 
 
-def make_publisher(shared: Shared, task, collector_ref: list):
+def make_publisher(shared: Shared, task, collector_ref: list, env=None, packer=None):
+    """Per-step publisher: panel JPEG (panel view) or pose frame + periodic wrist JPEG (3d view)."""
+    counter = [0]
+
     def publish(state, obs, info):
         info = dict(info)
         if "phase" in info and info["phase"] is not None and info["phase"] < len(task.phases):
@@ -96,18 +111,52 @@ def make_publisher(shared: Shared, task, collector_ref: list):
         elif "phase" in info:
             info["phase_name"] = "done"
         info["saved"] = collector_ref[0].saved if collector_ref else 0
-        ok, jpg = cv2.imencode(".jpg", panel_frame(obs, state, info, task.name), [cv2.IMWRITE_JPEG_QUALITY, 85])
         status = {"type": "status", "state": state, **{k: info[k] for k in
                   ("steps", "saved", "phase_name", "clutched", "precision", "stale", "flash", "path") if k in info}}
+        counter[0] += 1
+        frame = wrist = None
+        if shared.view == "3d" and packer is not None:
+            flags = [float(bool(info.get(k))) for k in ("clutched", "precision", "stale")] + [float(info.get("gripper", -1.0))]
+            frame = packer.pack(env.sim.data._data, target=info.get("target"), flags=flags)
+            cam = obs.get("robot0_eye_in_hand_image")
+            if cam is not None and counter[0] % 2 == 0:
+                ok, jpg = cv2.imencode(".jpg", cv2.cvtColor(np.ascontiguousarray(cam[::-1]), cv2.COLOR_RGB2BGR),
+                                       [cv2.IMWRITE_JPEG_QUALITY, 80])
+                if ok:
+                    wrist = MSG_WRIST_HEADER + jpg.tobytes()
+        else:
+            ok, jpg = cv2.imencode(".jpg", panel_frame(obs, state, info, task.name), [cv2.IMWRITE_JPEG_QUALITY, 85])
+            frame = jpg.tobytes() if ok else None
         with shared.lock:
-            if ok:
-                shared.frame, shared.frame_id = jpg.tobytes(), shared.frame_id + 1
+            if frame is not None:
+                shared.frame, shared.frame_id = frame, shared.frame_id + 1
+            if wrist is not None:
+                shared.wrist, shared.wrist_id = wrist, shared.wrist_id + 1
             shared.status = status
     return publish
 
 
 async def index(request):
-    return web.FileResponse(os.path.join(STATIC, "panel.html"))
+    shared: Shared = request.app[SHARED]
+    return web.FileResponse(os.path.join(STATIC, "vr3d.html" if shared.view == "3d" else "panel.html"))
+
+
+async def scene_glb(request):
+    shared: Shared = request.app[SHARED]
+    if shared.scene_glb is None:
+        raise web.HTTPNotFound()
+    headers = {"Cache-Control": "no-store"}
+    if shared.scene_glb_gz is not None and "gzip" in request.headers.get("Accept-Encoding", ""):
+        headers["Content-Encoding"] = "gzip"
+        return web.Response(body=shared.scene_glb_gz, content_type="model/gltf-binary", headers=headers)
+    return web.Response(body=shared.scene_glb, content_type="model/gltf-binary", headers=headers)
+
+
+async def manifest(request):
+    shared: Shared = request.app[SHARED]
+    if shared.manifest is None:
+        raise web.HTTPNotFound()
+    return web.json_response(shared.manifest)
 
 
 async def ws_handler(request):
@@ -117,14 +166,18 @@ async def ws_handler(request):
     print("[ws] client connected", flush=True)
 
     async def sender():
-        last_frame, last_status = -1, None
+        last_frame, last_wrist, last_status = -1, -1, None
         while not ws.closed:
             with shared.lock:
                 fid, frame, status = shared.frame_id, shared.frame, shared.status
+                wid, wrist = shared.wrist_id, shared.wrist
             try:
                 if frame is not None and fid != last_frame:
                     last_frame = fid
                     await ws.send_bytes(frame)
+                if wrist is not None and wid != last_wrist:
+                    last_wrist = wid
+                    await ws.send_bytes(wrist)
                 if status is not last_status:
                     last_status = status
                     await ws.send_str(json.dumps(status))
@@ -153,15 +206,14 @@ def build_app(shared: Shared) -> web.Application:
     app = web.Application()
     app[SHARED] = shared
     app.router.add_get("/", index)
+    app.router.add_get("/scene.glb", scene_glb)
+    app.router.add_get("/manifest.json", manifest)
     app.router.add_get("/ws", ws_handler)
     app.router.add_static("/static/", STATIC)
     return app
 
 
-def main(argv=None):
-    from fsim.collect import CollectConfig, Collector
-    from fsim.env.furniture_env import make_env
-
+def parse_args(argv=None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--task", default="one_leg")
     ap.add_argument("--randomness", default="low", choices=["none", "low", "med", "high"])
@@ -173,28 +225,82 @@ def main(argv=None):
     ap.add_argument("--camera-size", type=int, default=224)
     ap.add_argument("--max-steps", type=int, default=3000)
     ap.add_argument("--settle-capture", type=int, default=12)
-    args = ap.parse_args(argv)
+    ap.add_argument("--view", default="3d", choices=["3d", "panel"],
+                    help="3d: stereo WebXR scene from streamed poses; panel: the teammate-style camera panel")
+    return ap.parse_args(argv)
 
-    shared = Shared()
-    env = make_env(task=args.task, randomness=args.randomness, seed=args.seed, camera_size=args.camera_size)
+
+def start_collect(args, shared: Shared) -> tuple[threading.Thread, list]:
+    """Start the collect thread; returns (thread, [collector]) once the env (and 3d scene) is ready.
+
+    Everything that touches MuJoCo, including the EGL offscreen context robosuite creates with the
+    env, lives in that thread: a context only renders in the thread where it is current, and camera
+    images (recorded and streamed) come out as noise when the env is built in another thread.
+    """
+    from fsim.collect import CollectConfig, Collector
+    from fsim.env.furniture_env import make_env
+
     collector_ref: list = []
-    collector = Collector(env, CollectConfig(out_dir=args.out_dir, operator=args.operator, max_steps=args.max_steps,
-                                             settle_capture=args.settle_capture),
-                          shared.get_controller, make_publisher(shared, env.task, collector_ref))
-    collector_ref.append(collector)
+    ready, failed = threading.Event(), []
 
     def run():
+        try:
+            env = make_env(task=args.task, randomness=args.randomness, seed=args.seed, camera_size=args.camera_size)
+            packer = None
+            if args.view == "3d":
+                from fsim.vr.scene_export import PosePacker, export_scene
+                glb, manifest = export_scene(env.sim.model._model, groups=(1,), exclude=SCENE_EXCLUDE)
+                manifest["task"] = env.task.name
+                manifest["workspace_center"] = [float(v) for v in np.asarray(env.task.scene.W_origin) + np.array([0.2, 0.0, 0.0])]
+                manifest["highlight"] = sorted({f"{t.child}_main" for t in env.task.targets})
+                manifest["robot_base"] = [float(v) for v in env.sim.data.get_body_xpos(env.robots[0].robot_model.root_body)]
+                shared.scene_glb, shared.scene_glb_gz, shared.manifest = glb, gzip.compress(glb, 6), manifest
+                packer = PosePacker(manifest)
+                print(f"[server] 3d scene: {len(manifest['bodies'])} bodies, {len(glb) / 1e6:.1f} MB GLB", flush=True)
+            collector = Collector(env, CollectConfig(out_dir=args.out_dir, operator=args.operator, max_steps=args.max_steps,
+                                                     settle_capture=args.settle_capture),
+                                  shared.get_controller, make_publisher(shared, env.task, collector_ref, env, packer))
+            collector_ref.append(collector)
+        except BaseException as e:
+            failed.append(e)
+            raise
+        finally:
+            ready.set()
         try:
             collector.run(args.num_demos)
         finally:
             with shared.lock:
                 shared.status = {"type": "status", "state": "DONE", "saved": collector.saved}
-    threading.Thread(target=run, daemon=True).start()
+            env.close()                    # frees the EGL context in the thread that owns it
+
+    thread = threading.Thread(target=run, name="collect", daemon=True)
+    thread.start()
+    ready.wait()
+    if failed:
+        raise RuntimeError(f"env setup failed: {failed[0]!r}") from failed[0]
+    return thread, collector_ref
+
+
+def stop_collect(thread: threading.Thread, collector_ref: list, timeout: float = 10.0):
+    """Stop the episode loop and wait for the collect thread to release MuJoCo/EGL: tearing them
+    down at interpreter exit under a running render segfaults."""
+    if collector_ref:
+        collector_ref[0].running = False
+    thread.join(timeout=timeout)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    shared = Shared(view=args.view)
+    try:
+        thread, collector_ref = start_collect(args, shared)
+    except RuntimeError as e:
+        raise SystemExit(f"[server] {e}")
     print(f"[server] http://localhost:{args.port}  task {args.task} ({args.randomness}) -> {args.out_dir}", flush=True)
     try:
         web.run_app(build_app(shared), host="127.0.0.1", port=args.port, print=None)
     finally:
-        collector.running = False
+        stop_collect(thread, collector_ref)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ usage: bash stack.sh <command> [flags]
   check            run the tests and the reach check (no Quest needed)
   start [flags]    adb reverse + collection server on :8003 (Ctrl-C stops it); flags go to fsim.server,
                    e.g. --task one_leg --randomness low --num-demos 50 --operator alice
+                   (--view panel: camera panel instead of the 3D view)
   status           server, port, adb reverse, assets, episode counts
   kill             stop the server
   merge [flags]    merge episodes into one robomimic file: bash stack.sh merge -o one_leg.hdf5 [--success-only]
