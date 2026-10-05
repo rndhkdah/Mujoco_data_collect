@@ -1,0 +1,14 @@
+{
+  "_comment": "Cube env: two identical 5cm cubes (red/yellow). Init lattice anchored to the cube center: lowest layer = center + init_clearance.",
+  "objects": ["red_cube", "yellow_cube"],
+  "obj_center": [0.0, 0.16],
+  "obj_sep": 0.07,
+  "obj_axis": "x",
+  "basket_xy": [0.0, -0.18],
+  "init_anchor": "com",
+  "init_clearance": 0.1,
+  "layer_dz": 0.05,
+  "n_layers": 3,
+  "grid_span": 0.02,
+  "span_grow": 0.015
+}

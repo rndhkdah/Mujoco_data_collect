@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>STIR Sim Teleop</title>
+<style>
+  body { background:#111; color:#eee; font-family:sans-serif; margin:0; padding:20px; }
+  #enter { font-size:28px; padding:20px 40px; margin:20px 0; background:#2a7; color:#fff;
+           border:none; border-radius:12px; }
+  #enter:disabled { background:#555; }
+  #log { white-space:pre-wrap; font-family:monospace; font-size:16px; margin-top:16px;
+         max-height:50vh; overflow:auto; }
+  #preview { max-width:320px; border:1px solid #444; margin-top:10px; }
+</style>
+</head>
+<body>
+  <h2>STIR sim: Quest Teleop</h2>
+  <button id="enter" disabled>Connecting…</button>
+  <div>Hold <b>GRIP</b> = move EE · Hold <b>A</b> = rotate · <b>TRIGGER</b> = gripper · <b>B</b> = discard · <b>L-stick Y</b> = panel size · <b>R-stick Y</b> = panel distance</div>
+  <img id="preview" alt="(sim preview will appear here)">
+  <div id="log"></div>
+
+<script>
+const logEl = document.getElementById('log');
+function log(msg){ logEl.textContent = (new Date().toLocaleTimeString()+'  '+msg+'\n') + logEl.textContent; }
+
+let ws;
+let latestBitmap = null;
+let pendingDecode = false;
+const preview = document.getElementById('preview');
+
+function connect(){
+  const url = (location.protocol==='https:'?'wss://':'ws://') + location.host + '/ws';
+  ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => { log('ws connected'); document.getElementById('enter').disabled=false;
+                      document.getElementById('enter').textContent='Enter VR'; };
+  ws.onclose = () => { log('ws closed, retrying in 1s'); setTimeout(connect, 1000); };
+  ws.onerror = (e) => log('ws error');
+  ws.onmessage = (ev) => {
+    if (ev.data instanceof ArrayBuffer){
+      if (pendingDecode) return;
+      pendingDecode = true;
+      const blob = new Blob([ev.data], {type:'image/jpeg'});
+      createImageBitmap(blob).then(bm => {
+        if (latestBitmap) latestBitmap.close();
+        latestBitmap = bm; pendingDecode = false; newFrame = true; frameCount++;
+        if (!xrSession){ const u=URL.createObjectURL(blob); preview.src=u; setTimeout(()=>URL.revokeObjectURL(u),1000); }
+      }).catch(()=>{ pendingDecode=false; });
+    }
+  };
+}
+function wsSend(obj){ if (ws && ws.readyState===1) ws.send(JSON.stringify(obj)); }
+let frameCount = 0, lastFrameCount = 0;
+connect();
+
+setInterval(()=>{
+  const fps = frameCount - lastFrameCount; lastFrameCount = frameCount;
+  log(`frames=${frameCount} (${fps}/s)  ws=${ws&&ws.readyState===1?'open':'closed'}  xr=${xrSession?blendMode:'no'}`);
+}, 2000);
+
+let gl, xrSession=null, refSpace=null, program, tex, quadBuf, newFrame=false, blendMode='?';
+let aPos, aUV, uMVP, uTex;
+let prevB = false;
+let panelDist = 2.5;
+let panelScale = 1.0;
+
+let lastLeft = null, lastRight = null;
+
+const VERT = `
+attribute vec2 aPos; attribute vec2 aUV; varying vec2 vUV;
+uniform mat4 uMVP;
+void main(){ vUV = aUV; gl_Position = uMVP * vec4(aPos, 0.0, 1.0); }`;
+const FRAG = `
+precision mediump float; varying vec2 vUV; uniform sampler2D uTex;
+void main(){ gl_FragColor = texture2D(uTex, vUV); }`;
+
+function compile(type, src){ const s=gl.createShader(type); gl.shaderSource(s,src); gl.compileShader(s);
+  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)) log('shader: '+gl.getShaderInfoLog(s)); return s; }
+
+function initGL(){
+  program = gl.createProgram();
+  gl.attachShader(program, compile(gl.VERTEX_SHADER, VERT));
+  gl.attachShader(program, compile(gl.FRAGMENT_SHADER, FRAG));
+  gl.linkProgram(program);
+  aPos = gl.getAttribLocation(program,'aPos');
+  aUV  = gl.getAttribLocation(program,'aUV');
+  uMVP = gl.getUniformLocation(program,'uMVP');
+  uTex = gl.getUniformLocation(program,'uTex');
+
+  const s = 1.0;
+  const verts = new Float32Array([
+    -s,-s, 0,1,   s,-s, 1,1,   s, s, 1,0,
+    -s,-s, 0,1,   s, s, 1,0,  -s, s, 0,0,
+  ]);
+  quadBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
+  tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([40,40,40,255]));
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+}
+
+function mul(a,b){
+  const o=new Float32Array(16);
+  for(let c=0;c<4;c++) for(let r=0;r<4;r++){
+    o[c*4+r]=a[0*4+r]*b[c*4+0]+a[1*4+r]*b[c*4+1]+a[2*4+r]*b[c*4+2]+a[3*4+r]*b[c*4+3];
+  }
+  return o;
+}
+
+function modelMat(sx, sy, D){
+  return new Float32Array([ sx,0,0,0,  0,sy,0,0,  0,0,1,0,  0,0,-D,1 ]);
+}
+
+document.getElementById('enter').onclick = async () => {
+  if (!navigator.xr){ log('WebXR not available in this browser'); return; }
+
+  let arOK = false;
+  try { arOK = !!(navigator.xr.isSessionSupported && await navigator.xr.isSessionSupported('immersive-ar')); } catch(e){}
+  log('immersive-ar supported: ' + arOK);
+  try {
+    xrSession = await navigator.xr.requestSession(arOK ? 'immersive-ar' : 'immersive-vr',
+                                                  {optionalFeatures:['local-floor']});
+  } catch(e){
+    log('AR request failed ('+e+') -> trying VR');
+    try { xrSession = await navigator.xr.requestSession('immersive-vr', {optionalFeatures:['local-floor']}); }
+    catch(e2){ log('requestSession failed: '+e2); return; }
+  }
+  const blend = xrSession.environmentBlendMode || '?';
+  blendMode = blend;
+  log(blend==='opaque' ? '>>> XR = VR / OPAQUE -- NO passthrough (real room hidden)'
+                       : '>>> XR = AR / '+blend+' -- passthrough ON (you should see the room)');
+  const canvas = document.createElement('canvas');
+  gl = canvas.getContext('webgl', {xrCompatible:true, alpha:true, premultipliedAlpha:false});
+  initGL();
+  await xrSession.updateRenderState({ baseLayer: new XRWebGLLayer(xrSession, gl, {alpha:true}) });
+  try { refSpace = await xrSession.requestReferenceSpace('local-floor'); }
+  catch(e){ refSpace = await xrSession.requestReferenceSpace('local'); }
+  xrSession.requestAnimationFrame(onXRFrame);
+  xrSession.onend = () => { log('XR session ended'); xrSession=null; };
+};
+
+function onXRFrame(t, frame){
+  const session = frame.session;
+  session.requestAnimationFrame(onXRFrame);
+
+  if (newFrame && latestBitmap){
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,latestBitmap);
+    newFrame = false;
+  }
+
+  const readHand = (hand) => {
+    let best = null, bestScore = -1;
+    const srcs = [];
+    for (const src of session.inputSources){
+      if (src.handedness !== hand) continue;
+      const gp = src.gamepad;
+      const poseD = src.gripSpace ? frame.getPose(src.gripSpace, refSpace) : null;
+      srcs.push({ prof: (src.profiles && src.profiles[0]) || '?', hand: !!src.hand,
+                  btn: gp && gp.buttons ? gp.buttons.length : -1,
+                  ax: gp && gp.axes ? gp.axes.length : -1, trk: !!poseD,
+                  t0: gp && gp.buttons && gp.buttons[0] ? +gp.buttons[0].value.toFixed(2) : -1 });
+
+      if (!gp || !gp.buttons || gp.buttons.length < 2) continue;
+      const pose = poseD;
+
+      const score = (pose ? 100 : 0) + gp.buttons.length + (gp.axes ? gp.axes.length : 0);
+      if (score > bestScore){ bestScore = score; best = {src, gp, pose}; }
+    }
+    if (!best) return null;
+    const b = best.gp.buttons;
+    const p = best.pose ? best.pose.transform.position    : {x:0,y:0,z:0};
+    const o = best.pose ? best.pose.transform.orientation : {x:0,y:0,z:0,w:1};
+    return {
+      pos:[p.x,p.y,p.z], quat:[o.x,o.y,o.z,o.w], tracked: !!best.pose,
+      trigger: b[0]?b[0].value:0, grip: b[1]?b[1].value:0,
+      x: b[4]?b[4].pressed:false, y: b[5]?b[5].pressed:false,
+      a: b[4]?b[4].pressed:false, bbtn: b[5]?b[5].pressed:false,
+      stick: (best.gp.axes && best.gp.axes[3]!==undefined) ? best.gp.axes[3]
+             : ((best.gp.axes && best.gp.axes[1]) || 0),
+      srcs: srcs, chosen: (best.src.profiles && best.src.profiles[0]) || '?',
+    };
+  };
+
+  const l = readHand('left'), r = readHand('right');
+  if (l) lastLeft  = l;
+  if (r) lastRight = r;
+  const left = lastLeft, right = lastRight;
+
+  if (right){
+    if (Math.abs(right.stick) > 0.15) panelDist  = Math.min(8.0, Math.max(1.8, panelDist  - right.stick*0.05));
+    if (left && Math.abs(left.stick) > 0.15) panelScale = Math.min(2.5, Math.max(0.3, panelScale - left.stick*0.03));
+    wsSend({ type:'controller',
+      pos:right.pos, quat:right.quat, trigger:right.trigger, grip:right.grip,
+      a:right.a, bbtn:right.bbtn,
+      x: left?left.x:false, y: left?left.y:false,
+      left:left, right:right });
+  }
+
+  const pose = frame.getViewerPose(refSpace);
+  const layer = session.renderState.baseLayer;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
+  if ((session.environmentBlendMode||'opaque')==='opaque') gl.clearColor(0.05,0.05,0.07,1);
+  else gl.clearColor(0.0,0.0,0.0,0.0);
+  gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+  if (!pose) return;
+  gl.useProgram(program);
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+  gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos,2,gl.FLOAT,false,16,0);
+  gl.enableVertexAttribArray(aUV);  gl.vertexAttribPointer(aUV,2,gl.FLOAT,false,16,8);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex); gl.uniform1i(uTex,0);
+  const model = modelMat(1.0*panelScale, 0.5*panelScale, panelDist);
+  for (const view of pose.views){
+    const vp = layer.getViewport(view);
+    gl.viewport(vp.x, vp.y, vp.width, vp.height);
+    const mvp = mul(view.projectionMatrix, model);
+    gl.uniformMatrix4fv(uMVP, false, mvp);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+  }
+}
+</script>
+</body>
+</html>
