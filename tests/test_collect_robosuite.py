@@ -1,4 +1,5 @@
 """End-to-end recording through the teleop mapper with a scripted virtual operator (Linux only)."""
+import json
 import math
 import os
 
@@ -131,5 +132,57 @@ def test_scripted_episode_outcomes_without_saving(tmp_path):
         col.running = False
         assert col.record_scripted(hold(3), save=False) == ("stopped", None)
         assert not os.listdir(tmp_path) and col.saved == 0
+    finally:
+        env.close()
+
+
+def test_record_operator_renders_the_scene_from_the_headset_pose(tmp_path):
+    from fsim.env.arena import camera_quat
+    from fsim.geometry import quat_to_mat
+    env = make_env(task="one_leg", randomness="none", seed=0, camera_size=64)
+    try:
+        col = Collector(env, CollectConfig(out_dir=str(tmp_path), realtime=False, record_operator=True), lambda: (None, 1e9))
+        obs = env.reset()
+        default = col._obs_record(obs)                       # no headset yet: the camera's default viewpoint
+        assert default["operator_rgb"].shape == (64, 64, 3) and default["operator_rgb"].std() > 10
+        pos = np.array([0.2, -0.6, 0.9])                     # a head on the robot's right, looking at the workspace
+        col._head = (pos, quat_to_mat(camera_quat(pos, (0.2, 0.0, 0.415))))
+        rec = col._obs_record(obs)
+        assert np.allclose(rec["operator_head_pose"][:3], pos) and rec["operator_rgb"].std() > 10
+        assert np.abs(rec["operator_rgb"].astype(int) - default["operator_rgb"].astype(int)).mean() > 5
+        assert "operator_rgb" not in Collector(env, CollectConfig(out_dir=str(tmp_path)), lambda: (None, 1e9))._obs_record(obs)
+    finally:
+        env.close()
+
+
+
+def stand_leg_in_hole(env):
+    """Test setup: leg4 standing in hole 0 with its stud on the thread catch, the arm at home."""
+    s = env.task.screws[0]
+    seat = env.part_state.pose(TOP) @ env.screw.holes[0].T_local
+    env.part_state.set_pose(LEG, seat @ make_T((0, 0, s.travel + 0.001), rot_z(math.radians(200))))
+    mujoco.mj_forward(env.sim.model._model, env.sim.data._data)
+
+
+def test_auto_screw_takes_over_once_the_leg_stands_released(tmp_path):
+    env = make_env(task="one_leg", randomness="none", seed=0, camera_size=64)
+    try:
+        calls = [0]
+
+        def operator():                       # clutch once to start (staging the leg), then hands off
+            calls[0] += 1
+            if calls[0] == 1:
+                stand_leg_in_hole(env)
+            right = {"pos": [0, 0, 0], "quat": [0, 0, 0, 1], "tracked": True, "grip": float(calls[0] == 1), "trigger": 0.0}
+            return {"type": "controller", "frame": "robot", "right": right, "left": {}}, 0.0
+
+        col = Collector(env, CollectConfig(out_dir=str(tmp_path), realtime=False, max_steps=900, auto_screw=True), operator)
+        outcome, path = col.record_episode(col.wait_for_start())
+        assert outcome == "save"
+        with h5py.File(path, "r") as f:
+            g = f["data/demo_0"]
+            (start, end, seated), = json.loads(g.attrs["auto_screw"])
+            assert seated and 10 <= start < end < g.attrs["num_samples"] and g["dones"][-1] == 1
+        assert replay(path, mode="states")["success"]
     finally:
         env.close()

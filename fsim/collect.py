@@ -20,7 +20,8 @@ import numpy as np
 
 from fsim.data.hdf5_writer import EpisodeRecorder, write_episode
 from fsim.geometry import wxyz_to_xyzw, mat_to_quat
-from fsim.teleop.mapping import CONTROLLER_DIM, TeleopConfig, TeleopMapper
+from fsim.spec.square_table import OPERATOR_CAMERA
+from fsim.teleop.mapping import CONTROLLER_DIM, TeleopConfig, TeleopMapper, controller_vector, head_pose
 
 CAMERA_KEYS = {"front_image": "agentview_rgb", "robot0_eye_in_hand_image": "eye_in_hand_rgb", "rear_image": "rear_rgb"}
 
@@ -33,6 +34,9 @@ class CollectConfig:
     settle_capture: int = 12
     realtime: bool = True
     require_release: bool = True      # success counts once the gripper is commanded open
+    record_operator: bool = False     # also record the scene from the operator's headset (obs/operator_rgb)
+    auto_screw: bool = False          # one_leg: the scripted expert screws the leg in once it stands in a hole
+    auto_screw_after: int = 10        # ... and has stood there released for this many steps
     teleop: TeleopConfig = field(default_factory=TeleopConfig)
 
 
@@ -48,6 +52,7 @@ class _Episode:
     layout: list
     start_snapshot: dict
     wall0: float
+    auto: list = field(default_factory=list)      # auto-screw runs: [first step, end step, seated]
 
 
 def _git_commit() -> str:
@@ -80,6 +85,7 @@ class Collector:
         self.mapper = TeleopMapper(cfg.teleop, env.control_freq)
         self.running = True
         self.saved = 0
+        self._head = None                 # latest headset pose (pos, R) in the robot world frame
         m = env.sim.model._model
         self._state_spec = int(mujoco.mjtState.mjSTATE_INTEGRATION)
         self._state_buf = np.zeros(mujoco.mj_stateSize(m, self._state_spec))
@@ -98,7 +104,19 @@ class Collector:
                    gripper_states=obs["robot0_gripper_qpos"], gripper_width=[e.gripper_width()],
                    ee_pos=obs["robot0_eef_pos"], ee_quat=obs["robot0_eef_quat"], ee_pos_vel=lin, ee_ori_vel=ang,
                    parts_poses=e.parts_pose_vector())
+        if self.cfg.record_operator:
+            rec.update(self._operator_view())
         return rec
+
+    def _operator_view(self) -> dict:
+        """The scene rendered from the operator's head (the camera's default pose until a headset reports one)."""
+        sim = self.env.sim
+        d, cid = sim.data._data, sim.model.camera_name2id(OPERATOR_CAMERA)
+        if self._head is not None:           # mj_forward restores the default pose, so set it for every render
+            d.cam_xpos[cid], d.cam_xmat[cid] = self._head[0], self._head[1].ravel()
+        pose = np.r_[d.cam_xpos[cid], wxyz_to_xyzw(mat_to_quat(d.cam_xmat[cid].reshape(3, 3)))]
+        img = sim.render(camera_name=OPERATOR_CAMERA, width=self.env.camera_widths[0], height=self.env.camera_heights[0])
+        return dict(operator_rgb=img, operator_head_pose=pose)
 
     def _states(self):
         d, m = self.env.sim.data._data, self.env.sim.model._model
@@ -177,7 +195,7 @@ class Collector:
         import robosuite
         attrs = dict(success=True, task=e.task.name, randomness=e.randomness, layout=ep.layout, operator=cfg.operator,
                      source=source, duration_s=round(time.time() - ep.wall0, 2), control_hz=e.control_freq,
-                     model_file=e.sim.model.get_xml(), screw_events=ep.events, start_snapshot=ep.start_snapshot,
+                     model_file=e.sim.model.get_xml(), screw_events=ep.events, auto_screw=ep.auto, start_snapshot=ep.start_snapshot,
                      end_snapshot=e.fsim_snapshot(), date=stamp, git_commit=_git_commit(),
                      versions=dict(mujoco=mujoco.__version__, robosuite=robosuite.__version__, numpy=np.__version__))
         write_episode(path, ep.rec, env_args_of(e), attrs)
@@ -185,13 +203,60 @@ class Collector:
         self.publish("SAVED", obs, {"flash": "SAVED", "path": path})
         return path
 
+    def _leg_stands_released(self, out) -> bool:
+        """Auto-screw trigger: the target leg stands in a hole, stud on the thread catch, and the gripper has let go."""
+        e, leg = self.env, self.env.task.extras["target_leg"]
+        return out.gripper < 0 and e.screw.resting_hole(leg) is not None and not e.grasped(leg)
+
+    def _auto_screw(self, ep: "_Episode", obs):
+        """The scripted expert regrasps the standing leg from above and screws it in, recorded like the
+        operator's steps. B discards the episode. Returns the obs to continue teleoperating from."""
+        from fsim.env.expert import ExpertFailure, OneLegExpert
+        state, start = {"obs": obs}, len(ep.rec)
+
+        def step(action, target_pos, target_R):
+            if not self.running:
+                raise EpisodeAbort("stopped")
+            if len(ep.rec) >= self.cfg.max_steps:
+                raise EpisodeAbort("timeout")
+            t0 = time.monotonic()
+            msg, age = self.get_controller()
+            self._head = head_pose(msg) or self._head
+            b = age <= self.cfg.teleop.stale_after and bool(((msg or {}).get("right") or {}).get("b"))
+            if b and not self.mapper.prev_b:
+                raise EpisodeAbort("discard")
+            self.mapper.prev_b = b
+            action, target_pos = np.asarray(action, float), np.asarray(target_pos, float)
+            ee_pos, ee_R = self._ee()
+            fb = np.r_[target_pos - ee_pos, wxyz_to_xyzw(mat_to_quat(ee_R.T @ target_R)), action[6]]
+            obs, reward, info = self._record_step(ep, state["obs"], action, fb,
+                                                  np.r_[target_pos, wxyz_to_xyzw(mat_to_quat(target_R))], controller_vector(msg))
+            state["obs"] = obs
+            self.publish("RECORD", obs, dict(info, steps=len(ep.rec), target=np.r_[target_pos, mat_to_quat(target_R)],
+                                             gripper=float(action[6]), clutched=False, precision=False, stale=False,
+                                             flash="AUTO SCREW"))
+            self._pace(t0)
+            return obs, reward, False, info
+
+        try:
+            OneLegExpert(self.env, step_fn=step).screw_leg()
+            seated = True
+        except ExpertFailure as e:
+            print(f"[collect] auto screw failed: {e}", flush=True)
+            seated = False
+        ep.auto.append([start, len(ep.rec), seated])
+        self.mapper.reset(*self._ee())            # the operator continues from where the script left the arm
+        return state["obs"]
+
     def record_episode(self, obs) -> tuple[str, str | None]:
         cfg = self.cfg
         ep = self._begin()
         outcome = None
+        standing = 0          # steps the leg has stood released; -1 after an auto screw, until it is moved
         while self.running and outcome is None:
             t0 = time.monotonic()
             msg, age = self.get_controller()
+            self._head = head_pose(msg) or self._head
             ee_pos, ee_R = self._ee()
             out = self.mapper.update(msg, age, ee_pos, ee_R)
             if out.discard:
@@ -206,6 +271,15 @@ class Collector:
                 outcome = "save"
             elif len(ep.rec) >= cfg.max_steps:
                 outcome = "timeout"
+            elif cfg.auto_screw:
+                standing = 0 if not self._leg_stands_released(out) else standing + 1 if standing >= 0 else -1
+                if standing >= cfg.auto_screw_after:
+                    try:
+                        obs = self._auto_screw(ep, obs)
+                    except EpisodeAbort as e:
+                        outcome = str(e)
+                    standing = -1
+                    continue
             self._pace(t0)
         if outcome != "save":
             self.publish("DISCARD", obs, {"flash": "DISCARD" if outcome == "discard" else "TIMEOUT"})

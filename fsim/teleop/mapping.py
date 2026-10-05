@@ -50,10 +50,11 @@ def scale_rotation(R: np.ndarray, s: float) -> np.ndarray:
 
 @dataclass
 class TeleopConfig:
+    speed: float = 0.7                        # global scale on every teleop motion: hand following and stick rates
     pos_scale: float = 1.0
     rot_scale: float = 1.0
-    precision_pos: float = 0.35
-    precision_rot: float = 0.5
+    precision_pos: float = 0.2
+    precision_rot: float = 0.3
     twist_rate: float = math.radians(120.0)   # rad/s at full stick
     push_rate: float = 0.02                   # m/s at full stick
     stick_deadzone: float = 0.15
@@ -104,6 +105,18 @@ def controller_vector(msg: dict | None) -> np.ndarray:
     v[14], v[15] = float(bool(l.get("x"))), float(bool(l.get("y")))
     v[16:18] = (l.get("stick") or (0.0, 0.0))[:2]
     return v
+
+
+def head_pose(msg: dict | None) -> tuple[np.ndarray, np.ndarray] | None:
+    """Headset pose (pos, R) in the robot world frame from a controller message, or None. The head
+    frame is a MuJoCo camera frame: x right, y up, looking along -z."""
+    h = (msg or {}).get("head")
+    if not h:
+        return None
+    p, R = np.asarray(h["pos"], float), quat_to_mat(xyzw_to_wxyz(h["quat"]))
+    if msg.get("frame", "xr") == "xr":
+        p, R = XR_TO_ROBOT @ p, XR_TO_ROBOT @ R
+    return p, R
 
 
 class TeleopMapper:
@@ -157,8 +170,8 @@ class TeleopMapper:
                                    self.target_R.copy() if self.anchor else ee_R.copy())
                     self.anchor_precision = precision
                 c0_pos, c0_R, e0_pos, e0_R = self.anchor
-                ps = cfg.pos_scale * (cfg.precision_pos if precision else 1.0)
-                rs = cfg.rot_scale * (cfg.precision_rot if precision else 1.0)
+                ps = cfg.speed * cfg.pos_scale * (cfg.precision_pos if precision else 1.0)
+                rs = cfg.speed * cfg.rot_scale * (cfg.precision_rot if precision else 1.0)
                 S = scale_rotation(c_R @ c0_R.T, rs)
                 self.target_pos = e0_pos + ps * (c_pos - c0_pos)
                 self.target_R = S @ e0_R
@@ -173,13 +186,13 @@ class TeleopMapper:
                     self.target_pos, self.target_R = ee_pos.copy(), ee_R.copy()
             self.stick_active = sticks
             tool = self.target_R[:, 2]
-            dR = axis_angle(tool, sx * cfg.twist_rate * self.dt) if twist else None
+            dR = axis_angle(tool, sx * cfg.speed * cfg.twist_rate * self.dt) if twist else None
             if dR is not None and np.linalg.norm(rotvec(dR @ self.target_R @ ee_R.T)) <= cfg.max_twist_lead:
                 self.target_R = dR @ self.target_R
                 if self.anchor is not None:      # keep the twist when the clutch is held: target = dR S e0
                     c0_pos, c0_R, e0_pos, e0_R = self.anchor
                     self.anchor = (c0_pos, c0_R, e0_pos, S.T @ dR @ S @ e0_R)
-            dp = tool * (-sy) * cfg.push_rate * self.dt if push else None   # stick forward (negative y) pushes
+            dp = tool * (-sy) * cfg.speed * cfg.push_rate * self.dt if push else None   # stick forward (negative y) pushes
             if dp is not None and np.linalg.norm(self.target_pos + dp - ee_pos) <= cfg.max_push_lead:
                 self.target_pos = self.target_pos + dp
                 if self.anchor is not None:

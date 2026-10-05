@@ -4,7 +4,7 @@ import math
 import numpy as np
 
 from fsim.geometry import mat_to_quat, rot_x, rot_z, wxyz_to_xyzw
-from fsim.teleop.mapping import XR_TO_ROBOT, TeleopConfig, TeleopMapper, controller_vector, rotvec
+from fsim.teleop.mapping import XR_TO_ROBOT, TeleopConfig, TeleopMapper, controller_vector, head_pose, rotvec
 
 EE_POS = np.array([0.15, 0.0, 0.585])
 EE_R = np.diag([1.0, -1.0, -1.0])      # gripper pointing down
@@ -18,8 +18,8 @@ def msg(pos=(0, 0, 0), R=np.eye(3), grip=1.0, trigger=0.0, a=False, b=False, sti
             "left": {"x": x, "y": False, "stick": [0.0, 0.0]}}
 
 
-def mapper():
-    m = TeleopMapper(TeleopConfig(), control_hz=20)
+def mapper(speed=1.0):
+    m = TeleopMapper(TeleopConfig(speed=speed), control_hz=20)
     m.reset(EE_POS, EE_R)
     return m
 
@@ -56,7 +56,7 @@ def test_precision_mode_scales_and_reanchors():
     m.update(msg((0, 0, 0)), 0.0, EE_POS, EE_R)
     m.update(msg((0.0, 0, 0), a=True), 0.0, EE_POS, EE_R)                    # entering precision re-anchors
     out = m.update(msg((0.10, 0, 0), a=True), 0.0, EE_POS, EE_R)
-    assert np.allclose(out.target_pos - EE_POS, [0.035, 0, 0]) and out.precision
+    assert np.allclose(out.target_pos - EE_POS, [0.02, 0, 0]) and out.precision
 
 
 def test_stick_twists_about_tool_axis_and_pushes_along_it():
@@ -112,3 +112,27 @@ def test_fb_action_convention():
     q = out.action_fb[3:7]                                                       # xyzw, EE frame
     assert math.isclose(np.linalg.norm(q), 1.0, rel_tol=1e-6)
     assert controller_vector(msg()).shape == (18,)
+
+
+def test_head_pose_reads_the_headset_camera_frame():
+    assert head_pose(None) is None and head_pose(msg()) is None          # no headset in the message
+    R = rot_z(0.4) @ rot_x(1.1)
+    m = dict(msg(), head={"pos": [0.1, 0.2, 1.3], "quat": list(wxyz_to_xyzw(mat_to_quat(R)))})
+    p, Rh = head_pose(m)
+    assert np.allclose(p, [0.1, 0.2, 1.3]) and np.allclose(Rh, R, atol=1e-9)
+    # raw XR frame: a level head looking along XR -z looks along the robot's +x, with robot z up
+    p, Rh = head_pose({"frame": "xr", "head": {"pos": [0, 1.5, 0], "quat": [0, 0, 0, 1]}})
+    assert np.allclose(p, [0, 0, 1.5]) and np.allclose(-Rh[:, 2], [1, 0, 0]) and np.allclose(Rh[:, 1], [0, 0, 1])
+
+
+def test_global_speed_scales_hand_following_and_sticks():
+    assert TeleopConfig().speed == 0.7
+    m = mapper(speed=0.7)
+    m.update(msg((0.0, 0.0, 0.0)), 0.0, EE_POS, EE_R)                      # anchor
+    out = m.update(msg((0.1, 0.0, 0.0), rot_z(0.3)), 0.0, EE_POS, EE_R)
+    assert np.allclose(out.target_pos - EE_POS, [0.07, 0, 0])
+    assert np.isclose(np.linalg.norm(rotvec(out.target_R @ EE_R.T)), 0.21)
+    m = mapper(speed=0.7)
+    m.update(msg(grip=0.0, stick=(1.0, 0.0)), 0.0, EE_POS, EE_R)           # one step of full twist
+    out = m.update(msg(grip=0.0, stick=(1.0, 0.0)), 0.0, EE_POS, EE_R)
+    assert np.isclose(np.linalg.norm(rotvec(out.target_R @ EE_R.T)), 2 * 0.7 * TeleopConfig().twist_rate / 20)

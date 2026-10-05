@@ -81,17 +81,23 @@ keep the room visible.
 
 Episodes go to `$FSIM_DATA_DIR/<task>/<randomness>/*.hdf5` (default `~/fsim_dataset`).
 
+`--auto-screw` (one_leg) hands the screwing to the scripted expert: once the leg stands in a hole with the
+gripper open for half a second, the expert regrasps it from above and screws it in, then control returns to
+you. Those steps are recorded with the episode and listed in the `auto_screw` attr. B discards.
+
 `--autopilot` lets the scripted expert drive the arm in real time and saves nothing. Use it to check the
 headset view (frame rate, smoothness, depth, scene placement with the left hand) before learning the
 controls.
 
 ### Controls
 
+Every teleop motion (hand following and both stick rates) is scaled by `TeleopConfig.speed`, 0.7 by default.
+
 | Input | Action |
 |---|---|
 | R grip (hold) | clutch: the gripper follows your hand in position and rotation |
 | R trigger (hold) | close the gripper |
-| A (hold) | precision mode (smaller position and rotation gains) |
+| A (hold) | precision mode: the gripper moves 0.2x your hand in position and 0.3x in rotation |
 | R stick left/right | twist about the gripper axis, for screwing (works without the clutch) |
 | R stick up/down | push / pull along the gripper axis |
 | B | discard the episode (in READY: new layout) |
@@ -145,6 +151,8 @@ One HDF5 file per episode, in the teammate's layout plus extras. The full key li
   - `skills`, `phase`
   - the raw `controller` stream
   - `obs/rear_rgb` and `obs/parts_poses`
+  - with `--record-operator`: `obs/operator_rgb`, the scene rendered from the operator's headset pose (fovy
+    90), and `obs/operator_head_pose`. It is a MuJoCo render, so it has no ghost gripper or HUD.
   - attrs with the layout, screw events, start/end snapshots, versions and the real `env_args`
   - attr `source`: `teleop` for VR demos, `scripted` for expert demos
 

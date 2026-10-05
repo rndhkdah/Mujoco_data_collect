@@ -15,7 +15,10 @@ Layout (one demo per file; fsim/data/merge.py combines them):
     obs/eye_in_hand_rgb  wrist camera;  obs/rear_rgb
     obs/joint_states joint_vel gripper_states gripper_width ee_pos ee_quat(xyzw) ee_pos_vel ee_ori_vel
     obs/parts_poses (T,7P)  parts in the table frame W: pos + quat xyzw, task.part_names order
+    obs/operator_rgb     with --record-operator: the scene from the operator's headset pose (fovy 90)
+    obs/operator_head_pose (T,7)  that pose in the robot world frame: pos, quat xyzw (camera looks along -z)
   demo attrs: num_samples, model_file, success, task, randomness, seed, layout, operator, ...
+    auto_screw: [[first step, end step, seated], ...] for the steps the scripted expert drove (--auto-screw)
 """
 from __future__ import annotations
 
@@ -27,7 +30,7 @@ import h5py
 import numpy as np
 
 SCHEMA = "fsim/1"
-IMAGE_KEYS = {"agentview_rgb", "eye_in_hand_rgb", "rear_rgb"}
+IMAGE_KEYS = {"agentview_rgb", "eye_in_hand_rgb", "rear_rgb", "operator_rgb"}
 
 
 class EpisodeRecorder:

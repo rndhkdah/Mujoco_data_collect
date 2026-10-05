@@ -308,7 +308,7 @@ function drawHud(now){
   for (const [t, c] of tags){ ctx.fillStyle = c; ctx.fillText(t, x, 336); x += ctx.measureText(t).width + 40; }
   if (flash){
     ctx.textAlign = 'right'; ctx.font = 'bold 100px sans-serif';
-    ctx.fillStyle = (flash === 'SAVED' || flash === 'SUCCESS') ? '#3d3' : (flash === 'NEW LAYOUT' ? '#3cf' : '#f44');
+    ctx.fillStyle = (flash === 'SAVED' || flash === 'SUCCESS') ? '#3d3' : ((flash === 'NEW LAYOUT' || flash === 'AUTO SCREW') ? '#3cf' : '#f44');
     ctx.fillText(flash, W - 36, 106);
   }
   hud.tex.needsUpdate = true;
@@ -394,7 +394,8 @@ function readHand(session, frame, refSpace, hand){
   const b = best.gp.buttons, ax = best.gp.axes || [];
   const val = (i) => b[i] ? b[i].value : 0, pressed = (i) => b[i] ? b[i].pressed : false;
   // xr-standard: 0 trigger, 1 squeeze, 3 stick press, 4 A/X, 5 B/Y; axes 2/3 = stick x/y
-  return { pose: best.pose, trigger: val(0), grip: val(1), a: pressed(4), b: pressed(5), stick: [ax[2] || 0, ax[3] || 0] };
+  const so = ax.length >= 4 ? 2 : 0;      // some browsers report the stick as the only two axes
+  return { pose: best.pose, trigger: val(0), grip: val(1), a: pressed(4), b: pressed(5), stick: [ax[so] || 0, ax[so + 1] || 0] };
 }
 
 // controller grip pose (XR reference space = three.js world) -> MuJoCo world, through the stage and root
@@ -418,7 +419,7 @@ function xrInput(frame, dt){
   const r = readHand(session, frame, ref, 'right'), l = readHand(session, frame, ref, 'left');
   if (r) lastRight = r;
   if (l) lastLeft = l;      // hold the last good read across a dropped frame
-  const viewer = (needRecenter || (l && l.b && !prevY)) ? frame.getViewerPose(ref) : null;
+  const viewer = frame.getViewerPose(ref);
   if (needRecenter && viewer){ recenter(viewer.transform); needRecenter = false; }
   // Placement changes move the robot frame under a held clutch, so they wait until the R grip is released.
   const clutching = !!lastRight && lastRight.grip > 0.5;
@@ -438,6 +439,7 @@ function xrInput(frame, dt){
   if (r && r.pose) robotPose = poseToRobot(r.pose);
   if (!robotPose) return;
   wsSend({ type: 'controller', frame: 'robot', seq: seq++, t: Date.now(),
+           head: viewer ? poseToRobot(viewer) : undefined,      // recorded with --record-operator
            right: { pos: robotPose.pos, quat: robotPose.quat, tracked: !!(r && r.pose), trigger: lastRight.trigger,
                     grip: lastRight.grip, a: lastRight.a, b: lastRight.b, stick: lastRight.stick },
            left: lastLeft ? { x: lastLeft.a, y: lastLeft.b, stick: lastLeft.stick } : {} });

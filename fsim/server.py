@@ -237,6 +237,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--settle-capture", type=int, default=12)
     ap.add_argument("--view", default="3d", choices=["3d", "panel"],
                     help="3d: stereo WebXR scene from streamed poses; panel: the teammate-style camera panel")
+    ap.add_argument("--record-operator", action="store_true",
+                    help="also record the scene as seen from the operator's headset (obs/operator_rgb, "
+                         "obs/operator_head_pose)")
+    ap.add_argument("--auto-screw", action="store_true",
+                    help="one_leg: once the leg stands released in a hole, the scripted expert regrasps it and "
+                         "screws it in (recorded with the episode; B discards)")
     ap.add_argument("--autopilot", action="store_true",
                     help="the scripted expert (one_leg) drives the arm in real time instead of the VR operator, "
                          "to watch in the headset or a browser; nothing is saved")
@@ -271,7 +277,8 @@ def start_collect(args, shared: Shared) -> tuple[threading.Thread, list]:
                 packer = PosePacker(manifest)
                 print(f"[server] 3d scene: {len(manifest['bodies'])} bodies, {len(glb) / 1e6:.1f} MB GLB", flush=True)
             collector = Collector(env, CollectConfig(out_dir=args.out_dir, operator=args.operator, max_steps=args.max_steps,
-                                                     settle_capture=args.settle_capture),
+                                                     settle_capture=args.settle_capture,
+                                                     record_operator=args.record_operator, auto_screw=args.auto_screw),
                                   shared.get_controller, make_publisher(shared, env.task, collector_ref, env, packer))
             collector_ref.append(collector)
         except BaseException as e:
@@ -311,8 +318,8 @@ def stop_collect(thread: threading.Thread, collector_ref: list, timeout: float =
 
 def main(argv=None):
     args = parse_args(argv)
-    if args.autopilot and args.task != "one_leg":
-        raise SystemExit("[server] --autopilot only knows the one_leg task")
+    if (args.autopilot or args.auto_screw) and args.task != "one_leg":
+        raise SystemExit("[server] --autopilot and --auto-screw only know the one_leg task")
     shared = Shared(view=args.view)
     try:
         thread, collector_ref = start_collect(args, shared)

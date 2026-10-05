@@ -141,6 +141,7 @@ FENCE_FRONT = BoxObstacle("fence_front", (0.3815, 0.0, 0.015), (0.01, 0.175, 0.0
 FENCE_LEFT = BoxObstacle("fence_left", (0.3065, 0.175, 0.015), (0.085, 0.01, 0.015))
 FENCE_RIGHT = BoxObstacle("fence_right", (0.3065, -0.175, 0.015), (0.085, 0.01, 0.015))
 ROBOT_BASE = (-0.3, 0.0, 0.43)
+OPERATOR_CAMERA = "operator"
 _REAR_POS = (ROBOT_BASE[0] + 0.08, 0.0, ROBOT_BASE[2] + 0.2)
 SCENE = SceneSpec(
     robot_base=ROBOT_BASE,
@@ -150,6 +151,9 @@ SCENE = SceneSpec(
         CameraSpec("rear", _REAR_POS,
                    (_REAR_POS[0] + math.cos(math.radians(35)), 0.0, _REAR_POS[2] - math.sin(math.radians(35))),
                    fovy=40.0),
+        # The VR operator's view (--record-operator): the collector moves it to the headset pose each
+        # step. This default is the page's starting viewpoint, at the robot's left-rear.
+        CameraSpec(OPERATOR_CAMERA, (-0.62, 0.475, 1.015), (0.2, 0.0, 0.415), fovy=90.0),
     ),
 )
 
