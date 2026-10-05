@@ -1,0 +1,23 @@
+{
+  "_comment": "Example object env: milk + tomato_sauce (taller than the cube).",
+  "objects": [
+    "milk",
+    "tomato_sauce"
+  ],
+  "obj_center": [
+    0.0,
+    0.2
+  ],
+  "obj_sep": 0.08,
+  "obj_axis": "x",
+  "basket_xy": [
+    0.0,
+    -0.18
+  ],
+  "init_anchor": "top",
+  "init_clearance": 0.06,
+  "layer_dz": 0.05,
+  "n_layers": 3,
+  "grid_span": 0.02,
+  "span_grow": 0.015
+}

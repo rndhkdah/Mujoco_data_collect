@@ -1,0 +1,26 @@
+{
+  "_comment": "Voxel env: 5cm voxel grid around each cube, object in the bottom-center cell, bottom layer dropped. One trajectory per reachable voxel per target (red, yellow), in both cube arrangements (voxel_swap=1). At most 18 voxels/cube x 2 targets x 2 arrangements = 72.",
+  "objects": [
+    "red_cube",
+    "yellow_cube"
+  ],
+  "obj_center": [
+    0.0,
+    0.05
+  ],
+  "obj_sep": 0.07,
+  "obj_axis": "x",
+  "basket_xy": [
+    0.0,
+    -0.18
+  ],
+  "init_mode": "voxel",
+  "voxel_size": 0.05,
+  "voxel_dims": [
+    3,
+    3,
+    3
+  ],
+  "voxel_drop_bottom": 1,
+  "voxel_swap": 1
+}

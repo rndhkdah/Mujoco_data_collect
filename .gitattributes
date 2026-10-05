@@ -2,3 +2,4 @@
 *.stl binary
 *.png binary
 *.hdf5 binary
+reference/** -text
