@@ -7,7 +7,7 @@ usage: bash stack.sh <command> [flags]
 
   setup            create the venv (../fsim_venv), install requirements, build the gripper and meshes
   check            run the tests (incl. a recorded scripted-expert episode) and the reach check; no Quest needed
-  start [flags]    adb reverse + collection server on :8003 (Ctrl-C stops it); flags go to fsim.server,
+  start [flags]    adb reverse + collection server on :8004 (Ctrl-C stops it); flags go to fsim.server,
                    e.g. --task one_leg --randomness low --num-demos 50 --operator alice
                    (--view panel: camera panel instead of the 3D view)
   status           server, port, adb reverse, assets, episode counts
@@ -18,7 +18,7 @@ usage: bash stack.sh <command> [flags]
   replay <file>    replay a recorded episode from its states and actions
 
 Episodes go to $FSIM_DATA_DIR/<task>/<randomness>/*.hdf5 (default ~/fsim_dataset).
-The Quest opens http://localhost:8003 through adb reverse.
+The Quest opens http://localhost:8004 through adb reverse.
 USAGE
   exit "${1:-1}"
 }

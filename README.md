@@ -151,6 +151,11 @@ One HDF5 file per episode, in the teammate's layout plus extras. The full key li
   - `skills`, `phase`
   - the raw `controller` stream
   - `obs/rear_rgb` and `obs/parts_poses`
+  - `obs/corner_rgb`: a camera above the table's far corner on the robot's left, looking down at the
+    workspace (this copy only).
+  - `obs/side_rgb`: a camera beside the table's long edge on the robot's left. Only this copy
+    (`Mujoco_data_collect_sidecam`, branch `side-camera`) has it; it defaults to port 8004 and
+    `~/fsim_dataset_sidecam` so it runs next to the original (port 8003, `~/fsim_dataset`).
   - with `--record-operator`: `obs/operator_rgb`, the scene rendered from the operator's headset pose (fovy
     90), and `obs/operator_head_pose`. It is a MuJoCo render, so it has no ghost gripper or HUD.
   - attrs with the layout, screw events, start/end snapshots, versions and the real `env_args`

@@ -3,8 +3,8 @@
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 VENV_DIR=${VENV_DIR:-"$(dirname "$REPO")/fsim_venv"}
 VENV_PY=${VENV_PY:-"$VENV_DIR/bin/python"}
-FSIM_PORT=${FSIM_PORT:-8003}
-export FSIM_DATA_DIR=${FSIM_DATA_DIR:-$HOME/fsim_dataset}
+FSIM_PORT=${FSIM_PORT:-8004}
+export FSIM_DATA_DIR=${FSIM_DATA_DIR:-$HOME/fsim_dataset_sidecam}
 export MUJOCO_GL=${MUJOCO_GL:-egl}
 export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
 

@@ -62,7 +62,7 @@ class KinovaFurnitureEnv(SingleArmEnv):
         horizon=3000,
         ignore_done=True,
         hard_reset=False,
-        camera_names=("front", "robot0_eye_in_hand", "rear"),
+        camera_names=("front", "robot0_eye_in_hand", "rear", "side", "corner"),
         camera_heights=224,
         camera_widths=224,
         camera_depths=False,

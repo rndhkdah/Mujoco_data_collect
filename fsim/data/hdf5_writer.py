@@ -12,7 +12,8 @@ Layout (one demo per file; fsim/data/merge.py combines them):
     states_full (T,k)    mj_getState(mjSTATE_INTEGRATION): adds ctrl, act, eq_active, warmstart, ...
     controller (T,18)    raw VR controller stream (fsim.teleop.mapping.controller_vector)
     obs/agentview_rgb    front camera (raw robosuite frames, OpenGL convention, uint8, gzip)
-    obs/eye_in_hand_rgb  wrist camera;  obs/rear_rgb
+    obs/eye_in_hand_rgb  wrist camera;  obs/rear_rgb;  obs/side_rgb (beside the table, robot's left)
+    obs/corner_rgb       above the table's far-left corner, looking down at the workspace
     obs/joint_states joint_vel gripper_states gripper_width ee_pos ee_quat(xyzw) ee_pos_vel ee_ori_vel
     obs/parts_poses (T,7P)  parts in the table frame W: pos + quat xyzw, task.part_names order
     obs/operator_rgb     with --record-operator: the scene from the operator's headset pose (fovy 90)
@@ -30,7 +31,7 @@ import h5py
 import numpy as np
 
 SCHEMA = "fsim/1"
-IMAGE_KEYS = {"agentview_rgb", "eye_in_hand_rgb", "rear_rgb", "operator_rgb"}
+IMAGE_KEYS = {"agentview_rgb", "eye_in_hand_rgb", "rear_rgb", "side_rgb", "corner_rgb", "operator_rgb"}
 
 
 class EpisodeRecorder:

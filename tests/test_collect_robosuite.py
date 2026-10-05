@@ -87,6 +87,7 @@ def test_virtual_operator_episode_is_saved(recorded):
         T = g.attrs["num_samples"]
         assert g["actions"].shape == (T, 7) and g["actions_fb"].shape == (T, 8)
         assert g["obs/agentview_rgb"].shape == (T, 64, 64, 3) and g["obs/eye_in_hand_rgb"].shape == (T, 64, 64, 3)
+        assert g["obs/side_rgb"].shape == (T, 64, 64, 3) and g["obs/corner_rgb"].shape == (T, 64, 64, 3)
         assert g["obs/parts_poses"].shape == (T, 35) and g["controller"].shape == (T, 18)
         assert float(g["rewards"][()].sum()) == 1.0 and g["dones"][-1] == 1
         assert bool(g.attrs["success"]) and g.attrs["task"] == "one_leg"

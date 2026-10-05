@@ -23,7 +23,8 @@ from fsim.geometry import wxyz_to_xyzw, mat_to_quat
 from fsim.spec.square_table import OPERATOR_CAMERA
 from fsim.teleop.mapping import CONTROLLER_DIM, TeleopConfig, TeleopMapper, controller_vector, head_pose
 
-CAMERA_KEYS = {"front_image": "agentview_rgb", "robot0_eye_in_hand_image": "eye_in_hand_rgb", "rear_image": "rear_rgb"}
+CAMERA_KEYS = {"front_image": "agentview_rgb", "robot0_eye_in_hand_image": "eye_in_hand_rgb", "rear_image": "rear_rgb",
+               "side_image": "side_rgb", "corner_image": "corner_rgb"}
 
 
 @dataclass
