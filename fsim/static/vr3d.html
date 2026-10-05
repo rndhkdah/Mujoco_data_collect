@@ -50,9 +50,10 @@ window.addEventListener('error', (e) => log('error: ' + e.message));
 const params = new URLSearchParams(location.search);
 const INTERP = params.get('interp') !== '0';     // ?interp=0: show the latest pose frame without smoothing
 // Recenter puts the workspace center this far ahead of / below the eyes (m), with the scene turned by
-// `yaw` about it: -30 deg puts the operator at the robot's right-rear, so the arm does not hide the
-// workspace (?yaw=0: straight behind the robot).
-const VIEW = { dist: 0.95, drop: 0.6, yaw: THREE.MathUtils.degToRad(parseFloat(params.get('yaw') ?? '-30')) };
+// `yaw` about it: +30 deg puts the operator at the robot's left-rear. The arm then comes in from
+// the right, like the operator's own right arm, and the fence corner where the tabletop goes is
+// straight ahead (?yaw=0: straight behind the robot; ?yaw=-30: right-rear).
+const VIEW = { dist: 0.95, drop: 0.6, yaw: THREE.MathUtils.degToRad(parseFloat(params.get('yaw') ?? '30')) };
 const MSG_POSES = 2, MSG_WRIST = 3, HEADER = 12; // binary frames: see fsim/vr/scene_export.py
 
 // ------------------------------------------------------------------ renderer, lights, preview camera
@@ -307,7 +308,7 @@ function drawHud(now){
   for (const [t, c] of tags){ ctx.fillStyle = c; ctx.fillText(t, x, 336); x += ctx.measureText(t).width + 40; }
   if (flash){
     ctx.textAlign = 'right'; ctx.font = 'bold 100px sans-serif';
-    ctx.fillStyle = flash === 'SAVED' ? '#3d3' : (flash === 'NEW LAYOUT' ? '#3cf' : '#f44');
+    ctx.fillStyle = (flash === 'SAVED' || flash === 'SUCCESS') ? '#3d3' : (flash === 'NEW LAYOUT' ? '#3cf' : '#f44');
     ctx.fillText(flash, W - 36, 106);
   }
   hud.tex.needsUpdate = true;

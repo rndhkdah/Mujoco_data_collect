@@ -13,6 +13,7 @@ from dataclasses import asdict
 import numpy as np
 import trimesh
 
+from fsim.fileutil import atomic_replace, unique_tmp
 from fsim.spec.types import LegPartSpec, TaskSpec, TrayPartSpec
 
 SEGMENTS_PER_TURN = 48
@@ -125,8 +126,8 @@ def build_task_meshes(task: TaskSpec, root: str | None = None, force: bool = Fal
         path = os.path.join(out_dir, f"{part.name}.stl")
         if force or not os.path.isfile(path):
             mesh = tray_mesh(part) if isinstance(part, TrayPartSpec) else leg_stud_mesh(part)
-            tmp = path + ".tmp"
+            tmp = unique_tmp(path)
             mesh.export(tmp, file_type="stl")
-            os.replace(tmp, path)
+            atomic_replace(tmp, path)
         files[part.name] = path
     return files

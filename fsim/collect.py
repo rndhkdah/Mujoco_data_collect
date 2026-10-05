@@ -3,6 +3,8 @@
 Per episode: RESET (sample layout) -> WAIT (arm holds; B re-rolls the layout; the first clutch
 press starts recording) -> RECORD (20 Hz, paced to real time) -> on success with the gripper
 released: SETTLE (a few hold steps) -> SAVE; B or the step limit -> DISCARD.
+
+`record_scripted` records an episode driven by a script (e.g. fsim.env.expert) into the same files.
 """
 from __future__ import annotations
 
@@ -18,7 +20,7 @@ import numpy as np
 
 from fsim.data.hdf5_writer import EpisodeRecorder, write_episode
 from fsim.geometry import wxyz_to_xyzw, mat_to_quat
-from fsim.teleop.mapping import TeleopConfig, TeleopMapper
+from fsim.teleop.mapping import CONTROLLER_DIM, TeleopConfig, TeleopMapper
 
 CAMERA_KEYS = {"front_image": "agentview_rgb", "robot0_eye_in_hand_image": "eye_in_hand_rgb", "rear_image": "rear_rgb"}
 
@@ -32,6 +34,20 @@ class CollectConfig:
     realtime: bool = True
     require_release: bool = True      # success counts once the gripper is commanded open
     teleop: TeleopConfig = field(default_factory=TeleopConfig)
+
+
+class EpisodeAbort(Exception):
+    """A scripted episode ends early: "timeout" (step limit) or "stopped" (collector shut down)."""
+
+
+@dataclass
+class _Episode:
+    """What one episode accumulates until it is saved or dropped."""
+    rec: EpisodeRecorder
+    events: list
+    layout: list
+    start_snapshot: dict
+    wall0: float
 
 
 def _git_commit() -> str:
@@ -130,11 +146,48 @@ class Collector:
             self._pace(t0)
         return None
 
-    def record_episode(self, obs) -> tuple[str, str | None]:
+    def _begin(self) -> "_Episode":
+        e = self.env
+        return _Episode(rec=EpisodeRecorder(), events=[], start_snapshot=e.fsim_snapshot(), wall0=time.time(),
+                        layout=[dict(part=p.part, pos=list(p.pos), quat=list(p.quat)) for p in e.layout])
+
+    def _record_step(self, ep: "_Episode", obs, action, action_fb, target_pose, controller, phase_mark=False):
+        """Store the pre-step observation and state with the action, step the env, label the step."""
+        states, states_full = self._states()
+        ep.rec.add(self._obs_record(obs), actions=action, actions_fb=action_fb, target_pose=target_pose,
+                   controller=controller, states=states, states_full=states_full, skills_manual=int(phase_mark))
+        obs, reward, _, info = self.env.step(action)
+        ep.rec.mark_last(rewards=reward, dones=0, skills=int(info["skill"]), phase=info["phase"])
+        ep.events += info["screw_events"]
+        return obs, reward, info
+
+    def _settle(self, ep: "_Episode", obs, controller):
+        """A few hold steps after success, so the episode ends at rest; the last one is marked done."""
+        for _ in range(self.cfg.settle_capture):
+            pos, R = self._ee()
+            obs, _, _ = self._record_step(ep, obs, self._hold_action(), np.r_[np.zeros(3), 0, 0, 0, 1, -1.0],
+                                          np.r_[pos, wxyz_to_xyzw(mat_to_quat(R))], controller)
+        ep.rec.mark_last(dones=1)
+        return obs
+
+    def _save(self, ep: "_Episode", obs, source: str) -> str:
         e, cfg = self.env, self.cfg
-        rec = EpisodeRecorder()
-        events, layout = [], [dict(part=p.part, pos=list(p.pos), quat=list(p.quat)) for p in e.layout]
-        start_snapshot, wall0 = e.fsim_snapshot(), time.time()
+        stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = os.path.join(cfg.out_dir, e.task.name, e.randomness, f"{stamp}_{self.saved:04d}.hdf5")
+        import robosuite
+        attrs = dict(success=True, task=e.task.name, randomness=e.randomness, layout=ep.layout, operator=cfg.operator,
+                     source=source, duration_s=round(time.time() - ep.wall0, 2), control_hz=e.control_freq,
+                     model_file=e.sim.model.get_xml(), screw_events=ep.events, start_snapshot=ep.start_snapshot,
+                     end_snapshot=e.fsim_snapshot(), date=stamp, git_commit=_git_commit(),
+                     versions=dict(mujoco=mujoco.__version__, robosuite=robosuite.__version__, numpy=np.__version__))
+        write_episode(path, ep.rec, env_args_of(e), attrs)
+        self.saved += 1
+        self.publish("SAVED", obs, {"flash": "SAVED", "path": path})
+        return path
+
+    def record_episode(self, obs) -> tuple[str, str | None]:
+        cfg = self.cfg
+        ep = self._begin()
         outcome = None
         while self.running and outcome is None:
             t0 = time.monotonic()
@@ -144,44 +197,68 @@ class Collector:
             if out.discard:
                 outcome = "discard"
                 break
-            states, states_full = self._states()
-            rec.add(self._obs_record(obs), actions=out.action, actions_fb=out.action_fb,
-                    target_pose=np.r_[out.target_pos, wxyz_to_xyzw(mat_to_quat(out.target_R))],
-                    controller=out.raw, states=states, states_full=states_full, skills_manual=int(out.phase_mark))
-            obs, reward, _, info = e.step(out.action)
-            rec.mark_last(rewards=reward, dones=0, skills=int(info["skill"]), phase=info["phase"])
-            events += info["screw_events"]
-            self.publish("RECORD", obs, dict(info, steps=len(rec), **self._teleop_info(out)))
+            obs, _, info = self._record_step(ep, obs, out.action, out.action_fb,
+                                             np.r_[out.target_pos, wxyz_to_xyzw(mat_to_quat(out.target_R))],
+                                             out.raw, out.phase_mark)
+            self.publish("RECORD", obs, dict(info, steps=len(ep.rec), **self._teleop_info(out)))
             if info["success"] and (out.gripper < 0 or not cfg.require_release):
-                for _ in range(cfg.settle_capture):
-                    states, states_full = self._states()
-                    a = self._hold_action()
-                    rec.add(self._obs_record(obs), actions=a, actions_fb=np.r_[np.zeros(3), 0, 0, 0, 1, -1.0],
-                            target_pose=np.r_[self._ee()[0], wxyz_to_xyzw(mat_to_quat(self._ee()[1]))],
-                            controller=out.raw, states=states, states_full=states_full, skills_manual=0)
-                    obs, reward, _, info = e.step(a)
-                    rec.mark_last(rewards=reward, dones=0, skills=int(info["skill"]), phase=info["phase"])
-                    events += info["screw_events"]
-                rec.mark_last(dones=1)
+                obs = self._settle(ep, obs, out.raw)
                 outcome = "save"
-            elif len(rec) >= cfg.max_steps:
+            elif len(ep.rec) >= cfg.max_steps:
                 outcome = "timeout"
             self._pace(t0)
         if outcome != "save":
             self.publish("DISCARD", obs, {"flash": "DISCARD" if outcome == "discard" else "TIMEOUT"})
             return outcome or "stopped", None
-        stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-        path = os.path.join(cfg.out_dir, e.task.name, e.randomness, f"{stamp}_{self.saved:04d}.hdf5")
-        import robosuite
-        attrs = dict(success=True, task=e.task.name, randomness=e.randomness, layout=layout, operator=cfg.operator,
-                     duration_s=round(time.time() - wall0, 2), control_hz=e.control_freq,
-                     model_file=e.sim.model.get_xml(), screw_events=events, start_snapshot=start_snapshot,
-                     end_snapshot=e.fsim_snapshot(), date=stamp, git_commit=_git_commit(),
-                     versions=dict(mujoco=mujoco.__version__, robosuite=robosuite.__version__, numpy=np.__version__))
-        write_episode(path, rec, env_args_of(e), attrs)
-        self.saved += 1
-        self.publish("SAVED", obs, {"flash": "SAVED", "path": path})
-        return "save", path
+        return "save", self._save(ep, obs, "teleop")
+
+    def record_scripted(self, script, save: bool = True) -> tuple[str, str | None]:
+        """Run one episode driven by a script instead of the VR operator, and record it like a VR
+        demo (synthetic demos; checks the data pipeline on full episodes without a headset).
+
+        script(step) runs the episode on the freshly reset env, calling
+        step(action, target_pos, target_R) -> (obs, reward, done, info) once per control step.
+        The episode is saved only if the env reports success when the script returns.
+        save=False only runs and publishes it (the server's autopilot): outcome "success", no file.
+        """
+        cfg = self.cfg
+        state = {"obs": self.env.reset(), "info": {}, "steps": 0}
+        ep = self._begin() if save else None
+        no_controller = np.zeros(CONTROLLER_DIM, np.float32)
+
+        def step(action, target_pos, target_R):
+            if not self.running:
+                raise EpisodeAbort("stopped")
+            if state["steps"] >= cfg.max_steps:
+                raise EpisodeAbort("timeout")
+            t0 = time.monotonic()
+            action, target_pos = np.asarray(action, float), np.asarray(target_pos, float)
+            if save:
+                ee_pos, ee_R = self._ee()
+                fb = np.r_[target_pos - ee_pos, wxyz_to_xyzw(mat_to_quat(ee_R.T @ target_R)), action[6]]
+                obs, reward, info = self._record_step(ep, state["obs"], action, fb,
+                                                      np.r_[target_pos, wxyz_to_xyzw(mat_to_quat(target_R))], no_controller)
+            else:
+                obs, reward, _, info = self.env.step(action)
+            state.update(obs=obs, info=info, steps=state["steps"] + 1)
+            self.publish("RECORD", obs, dict(info, steps=state["steps"], target=np.r_[target_pos, mat_to_quat(target_R)],
+                                             gripper=float(action[6]), clutched=True, precision=False, stale=False))
+            self._pace(t0)
+            return obs, reward, False, info
+
+        try:
+            script(step)
+            outcome = "save" if state["info"].get("success") else "failed"
+        except EpisodeAbort as e:
+            outcome = str(e)
+        if outcome != "save":
+            self.publish("DISCARD", state["obs"], {"flash": "TIMEOUT" if outcome == "timeout" else "DISCARD"})
+            return outcome, None
+        if not save:
+            self.publish("SAVED", state["obs"], {"flash": "SUCCESS"})
+            return "success", None
+        obs = self._settle(ep, state["obs"], no_controller)
+        return "save", self._save(ep, obs, "scripted")
 
     def run(self, num_demos: int):
         while self.running and self.saved < num_demos:

@@ -6,12 +6,14 @@ Furniture assembly data collection: Kinova Gen3 in robosuite/MuJoCo, Quest WebXR
 usage: bash stack.sh <command> [flags]
 
   setup            create the venv (../fsim_venv), install requirements, build the gripper and meshes
-  check            run the tests and the reach check (no Quest needed)
+  check            run the tests (incl. a recorded scripted-expert episode) and the reach check; no Quest needed
   start [flags]    adb reverse + collection server on :8003 (Ctrl-C stops it); flags go to fsim.server,
                    e.g. --task one_leg --randomness low --num-demos 50 --operator alice
                    (--view panel: camera panel instead of the 3D view)
   status           server, port, adb reverse, assets, episode counts
   kill             stop the server
+  expert [flags]   scripted one_leg expert, no Quest needed: success rate, or demos with --record DIR,
+                   e.g. --randomness med --episodes 20
   merge [flags]    merge episodes into one robomimic file: bash stack.sh merge -o one_leg.hdf5 [--success-only]
   replay <file>    replay a recorded episode from its states and actions
 
@@ -79,6 +81,7 @@ case "$cmd" in
   start) start "$@" ;;
   status) status ;;
   kill) exec bash "$HERE/kill.sh" ;;
+  expert) need_venv; need_assets; cd "$REPO" && exec "$VENV_PY" -m fsim.env.expert "$@" ;;
   merge) need_venv; cd "$REPO" && exec "$VENV_PY" -m fsim.data.merge "$FSIM_DATA_DIR" "$@" ;;
   replay) need_venv; cd "$REPO" && "$VENV_PY" -m fsim.data.replay "$@" --mode states && "$VENV_PY" -m fsim.data.replay "$@" --mode actions ;;
   -h | --help | help | "") usage 0 ;;

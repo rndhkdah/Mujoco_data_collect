@@ -18,8 +18,8 @@ collection box (robosuite 1.4.0, MuJoCo 3.3.7, software EGL).
 |---|---|
 | M1 native core: specs, parametric parts, scene, helical screw constraint, assembly checks, reset sampling, phase labels | done; spike S1 passes |
 | M0 robosuite setup and robot spikes | done: every one_leg pose is reachable, the grip holds leg4 while twisting, the arm screws leg4 in (success, reward 1) |
-| M2 robosuite Kinova env (arena, cameras, home IK, grasp predicate) | done; the scripted full one_leg expert is still open |
-| M3 server, teleop mapping, per-episode HDF5, merge, replay | done; a virtual-operator recording replays from states and from actions |
+| M2 robosuite Kinova env (arena, cameras, home IK, grasp predicate) and scripted one_leg expert | done; the expert completed 40/40 low and 100/100 med layouts (target: 90% / 70%) |
+| M3 server, teleop mapping, per-episode HDF5, merge, replay | done; a full recorded expert episode (1141 steps) replays to success from states and from open-loop actions |
 | M4 3D WebXR client | done and checked in a desktop browser against the live server; the headset checks (72 Hz, pose lag under 120 ms, an operator completing one_leg) need the Quest |
 | M5 pilot and collection | needs the Linux box, the Quest and an operator |
 
@@ -30,7 +30,7 @@ fsim/geometry.py          SE(3) helpers
 fsim/spec/                task specs (square_table, one_leg) and their types
 fsim/models/              parametric MJCF parts, generated meshes, standalone scene
 fsim/sim/                 screw manager, assembly checker, reset sampler, phase tracker, scripted hand
-fsim/env/                 robosuite layer: KinovaFurnitureEnv, arena, Robotiq 2F-85, IK, scripted moves
+fsim/env/                 robosuite layer: KinovaFurnitureEnv, arena, Robotiq 2F-85, IK, scripted one_leg expert
 fsim/teleop/mapping.py    Quest controller -> grip-site target -> OSC_POSE action
 fsim/collect.py           episode loop (READY -> RECORD -> SAVE / DISCARD), headless-testable
 fsim/server.py            collection server: collect thread + aiohttp page/WebSocket
@@ -57,13 +57,15 @@ Generated meshes go to `fsim/assets/generated/<task>-<hash>/`, which is gitignor
 specs and the generator source. Set `FSIM_GENERATED` to use a different directory.
 
 On Windows the robosuite, collector and server tests skip (see the Linux notes below). Run them on Linux or
-WSL2 with `MUJOCO_GL=egl`.
+WSL2 with `MUJOCO_GL=egl`. One test records a full expert episode with cameras, which takes minutes on
+software rendering; `-m "not slow"` leaves it out.
 
 ## Collecting demos (Linux box + Quest 3)
 
 ```bash
 bash stack.sh setup     # venv ../fsim_venv, requirements, Robotiq gripper asset, part meshes
 bash stack.sh check     # tests + reach check (no Quest needed)
+bash stack.sh start --autopilot                        # watch the scripted expert in the headset first
 bash stack.sh start --task one_leg --randomness low --num-demos 50 --operator alice
 ```
 
@@ -78,6 +80,10 @@ keep the room visible.
 4. B discards the episode. Hitting the step limit (3000 steps, 150 s) times it out.
 
 Episodes go to `$FSIM_DATA_DIR/<task>/<randomness>/*.hdf5` (default `~/fsim_dataset`).
+
+`--autopilot` lets the scripted expert drive the arm in real time and saves nothing. Use it to check the
+headset view (frame rate, smoothness, depth, scene placement with the left hand) before learning the
+controls.
 
 ### Controls
 
@@ -100,8 +106,9 @@ Episodes go to `$FSIM_DATA_DIR/<task>/<randomness>/*.hdf5` (default `~/fsim_data
 headset's frame rate. The workspace sits 1:1 in front of you.
 
 - **What you see:**
-  - By default you look from the robot's right-rear, with the scene turned 30 degrees so the arm does not hide
-    the workspace. Use `?yaw=0` for a view straight from behind.
+  - By default you look from the robot's left-rear, with the scene turned 30 degrees. The arm then comes in
+    from your right, like your own right arm, and the fence corner where the tabletop goes is straight ahead.
+    Use `?yaw=0` for a view straight from behind, or `?yaw=-30` for the right-rear.
   - The part to assemble (leg4 in one_leg) is tinted.
   - A ghost gripper shows the commanded grip-site target. It is brighter while clutched, its fingers show the
     open/close command, and they turn cyan in precision mode.
@@ -139,6 +146,7 @@ One HDF5 file per episode, in the teammate's layout plus extras. The full key li
   - the raw `controller` stream
   - `obs/rear_rgb` and `obs/parts_poses`
   - attrs with the layout, screw events, start/end snapshots, versions and the real `env_args`
+  - attr `source`: `teleop` for VR demos, `scripted` for expert demos
 
 ```bash
 python -m fsim.data.inspect <file.hdf5>                       # fields and shapes
@@ -146,6 +154,32 @@ python -m fsim.data.replay <file.hdf5> --mode states          # reproduces the r
 python -m fsim.data.replay <file.hdf5> --mode actions         # open loop from the first state
 bash stack.sh merge -o one_leg.hdf5 --success-only           # robomimic-style file with masks
 ```
+
+### Scripted expert
+
+`fsim/env/expert.py` completes one_leg without a headset. It reads part poses from the simulation state, so
+it is a privileged script, not a vision policy.
+
+```bash
+bash stack.sh expert --randomness med --episodes 20                  # success rate (no cameras, about 15 s each)
+bash stack.sh expert --randomness low --episodes 5 --record ~/fsim_expert   # demos in the VR file format
+```
+
+- **Phases:** it follows the FurnitureBench phases with a parallel gripper:
+  1. Clamp the tabletop's rim wall that faces the robot.
+  2. Square the tabletop and slide it into the fence corner.
+  3. Grasp the lying leg with the gripper tilted 30 degrees and lift it.
+  4. Carry it over the nearest hole, turn it upright, and lower the stud until it rests on the thread catch.
+     Release it standing in the hole.
+  5. Regrasp from above and turn the wrist at 90 degrees/s until the leg seats. The Kinova's last joint is
+     continuous, so no regrasp is needed while screwing.
+- **Results (WSL2):** 40/40 at low (one seed) and 100/100 at med (three seeds). Episodes take about 950 to 1200 steps
+  (the limit is 3000).
+- **Limits:** the "high" presets are not covered. One of the three works. In another the target leg lies in
+  the corner where the tabletop must go, and in the third the leg is out of reach of the tilted grasp.
+- **Why the tilted grasp:** with a horizontal gripper the wrist links hang 5 to 9 cm below the grip point and
+  land on the lying legs or the 3 cm fence. Tilted, the gripper points 30 degrees down when the leg is
+  upright, and the wrist stays above the grip point.
 
 ## square_table / one_leg design
 
@@ -221,6 +255,10 @@ Spike S1 (MuJoCo 3.3.7) results:
   Equalities must be appended to the task model after `ManipulationTask` is built.
 - Call `HelicalScrewManager.update()` every physics substep (from `_pre_action`) and `reset()` in
   `_reset_internal` (robosuite uses `mj_resetData` when `hard_reset=False`).
+- Several processes may build the generated assets at once (the server and a replay, parallel jobs). The
+  writers use per-process temp files and an atomic rename (`fsim/fileutil.py`).
+- MuJoCo appends solver warnings to `MUJOCO_LOG.TXT` in the working directory (gitignored). An occasional
+  "Linesearch objective is not convex" during hard contact is harmless.
 - Generated mesh paths are absolute. robosuite's `edit_model_xml` (used by its playback, and by robomimic's
   `reset_to`) only relocates robosuite assets. `KinovaFurnitureEnv.edit_model_xml` also relocates the
   generated part meshes, rebuilding them from the stored spec hash if needed, and the Menagerie gripper.

@@ -108,3 +108,28 @@ def test_merge_builds_robomimic_file(recorded, tmp_path):
     with h5py.File(merged, "r") as f:
         assert sorted(f["data"].keys()) == ["demo_0", "demo_1"]
         assert [x.decode() for x in f["mask/none"][()]] == ["demo_0", "demo_1"]
+
+
+def test_scripted_episode_outcomes_without_saving(tmp_path):
+    """record_scripted(save=False) is the server's autopilot: it runs and publishes, and writes nothing."""
+    env = make_env(task="one_leg", randomness="none", seed=0, has_offscreen_renderer=False, use_camera_obs=False)
+    try:
+        seen = []
+        col = Collector(env, CollectConfig(out_dir=str(tmp_path), realtime=False, max_steps=5), lambda: (None, 1e9),
+                        publish=lambda state, obs, info: seen.append((state, info.get("steps"))))
+
+        def hold(n):
+            def script(step):
+                pos, R = col._ee()
+                for _ in range(n):
+                    step(np.zeros(7), pos, R)
+            return script
+
+        assert col.record_scripted(hold(3), save=False) == ("failed", None)      # ran, but the task is not done
+        assert [s for s in seen if s[0] == "RECORD"][-1] == ("RECORD", 3)
+        assert col.record_scripted(hold(9), save=False) == ("timeout", None)     # step limit 5
+        col.running = False
+        assert col.record_scripted(hold(3), save=False) == ("stopped", None)
+        assert not os.listdir(tmp_path) and col.saved == 0
+    finally:
+        env.close()

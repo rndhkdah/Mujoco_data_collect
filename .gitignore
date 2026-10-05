@@ -6,3 +6,4 @@ fsim/assets/generated/
 *.hdf5
 *.h5
 fsim/assets/grippers/
+MUJOCO_LOG.TXT

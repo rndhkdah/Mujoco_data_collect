@@ -12,6 +12,7 @@ import xml.etree.ElementTree as ET
 
 from robosuite.models.objects import MujocoXMLObject
 
+from fsim.fileutil import atomic_write_text
 from fsim.geometry import fmt
 from fsim.models.meshes import build_task_meshes
 from fsim.models.parts import build_part_body
@@ -55,10 +56,7 @@ def write_part_xml(task: TaskSpec, spec: PartSpec, mesh_path: str) -> str:
     _localize(root, spec.name)
     ET.indent(root)
     path = os.path.join(os.path.dirname(mesh_path), f"{spec.name}.xml")
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(ET.tostring(root, encoding="unicode"))
-    os.replace(tmp, path)
+    atomic_write_text(path, ET.tostring(root, encoding="unicode"))     # several envs may start at once
     return path
 
 

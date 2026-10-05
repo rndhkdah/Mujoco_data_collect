@@ -94,12 +94,14 @@ def test_3d_view_serves_scene_and_streams_pose_frames():
         try:
             r = await client.get("/")
             assert "Furniture Teleop 3D" in await r.text()
+            assert r.headers["Cache-Control"] == "no-cache"        # a headset must not run a stale client
             r = await client.get("/manifest.json")
             assert (await r.json())["bodies"] == shared.manifest["bodies"]
             r = await client.get("/scene.glb", headers={"Accept-Encoding": "gzip"})
             assert r.status == 200 and (await r.read())[:4] == b"glTF"     # gzip is undone by the client
             r = await client.get("/static/vendor/three/three.module.js")
             assert r.status == 200 and "javascript" in r.headers["Content-Type"]
+            assert r.headers["Cache-Control"] == "no-cache"
             ws = await client.ws_connect("/ws")
             pose = wrist = status = None
             for _ in range(10):

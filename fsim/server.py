@@ -96,7 +96,7 @@ def panel_frame(obs, state: str, info: dict, task_name: str, tile: int = 320) ->
     img = np.vstack([banner, row])
     if info.get("flash"):
         cv2.putText(img, info["flash"], (img.shape[1] // 2 - 90, img.shape[0] // 2), cv2.FONT_HERSHEY_SIMPLEX, 1.4,
-                    (0, 200, 0) if info["flash"] == "SAVED" else (0, 0, 230), 4)
+                    (0, 200, 0) if info["flash"] in ("SAVED", "SUCCESS") else (0, 0, 230), 4)
     return img
 
 
@@ -202,8 +202,18 @@ async def ws_handler(request):
     return ws
 
 
+@web.middleware
+async def revalidate_cache(request, handler):
+    """Without Cache-Control, browsers cache pages heuristically, and the headset would keep running an
+    old client after an update. "no-cache" makes them revalidate; ETags keep that cheap."""
+    resp = await handler(request)
+    if not isinstance(resp, web.WebSocketResponse):
+        resp.headers.setdefault("Cache-Control", "no-cache")
+    return resp
+
+
 def build_app(shared: Shared) -> web.Application:
-    app = web.Application()
+    app = web.Application(middlewares=[revalidate_cache])
     app[SHARED] = shared
     app.router.add_get("/", index)
     app.router.add_get("/scene.glb", scene_glb)
@@ -227,6 +237,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--settle-capture", type=int, default=12)
     ap.add_argument("--view", default="3d", choices=["3d", "panel"],
                     help="3d: stereo WebXR scene from streamed poses; panel: the teammate-style camera panel")
+    ap.add_argument("--autopilot", action="store_true",
+                    help="the scripted expert (one_leg) drives the arm in real time instead of the VR operator, "
+                         "to watch in the headset or a browser; nothing is saved")
     return ap.parse_args(argv)
 
 
@@ -267,7 +280,14 @@ def start_collect(args, shared: Shared) -> tuple[threading.Thread, list]:
         finally:
             ready.set()
         try:
-            collector.run(args.num_demos)
+            if args.autopilot:
+                from fsim.env.expert import OneLegExpert
+                while collector.running:
+                    outcome, _ = collector.record_scripted(lambda step: OneLegExpert(env, step_fn=step).run(), save=False)
+                    print(f"[autopilot] {outcome}", flush=True)
+                    time.sleep(2.0)                # leave the result on screen before the next layout
+            else:
+                collector.run(args.num_demos)
         finally:
             with shared.lock:
                 shared.status = {"type": "status", "state": "DONE", "saved": collector.saved}
@@ -291,6 +311,8 @@ def stop_collect(thread: threading.Thread, collector_ref: list, timeout: float =
 
 def main(argv=None):
     args = parse_args(argv)
+    if args.autopilot and args.task != "one_leg":
+        raise SystemExit("[server] --autopilot only knows the one_leg task")
     shared = Shared(view=args.view)
     try:
         thread, collector_ref = start_collect(args, shared)

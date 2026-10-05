@@ -128,3 +128,27 @@ def test_edit_model_xml_relocates_assets(env, tmp_path):
     fixed = env.edit_model_xml(moved)
     for path in re.findall(r'file="([^"]+)"', fixed):
         assert os.path.isfile(path), path
+
+
+def test_part_xmls_can_be_written_by_several_envs_at_once():
+    """Envs starting together (server + replay, parallel jobs) rewrite the same generated part XMLs."""
+    import threading
+
+    from fsim.env.objects import build_part_objects
+    from fsim.spec import get_task
+
+    task, errors = get_task("one_leg"), []
+
+    def build():
+        try:
+            for _ in range(5):
+                build_part_objects(task)
+        except Exception as e:      # noqa: BLE001  (collected for the assert below)
+            errors.append(e)
+
+    threads = [threading.Thread(target=build) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors
