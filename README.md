@@ -245,6 +245,78 @@ pose. Neither task has a scripted expert, auto-screw or reach check yet.
 - Estimated, not measured precisely: the base loft steps, the seat hub, plate thicknesses, and the
   stepped leg shear. Layouts, footprints and the three measured "high" layouts follow the design.
 
+## desk design
+
+`fsim/spec/desk.py`. The square_table construction at another size, with FurnitureBench's desk numbers.
+
+- **Parts:**
+  - `desk_top`: a 150 x 210 x 31.25 mm open tray (`TrayPartSpec`), 169.4 g. It has a 6.25 mm plate, a
+    6.25 mm rim, and a threaded boss (bore radius 12.5 mm, outer radius 16.25 mm) around each of 4 blind
+    holes at (+-50, +-80) mm.
+  - `desk_leg1..4` (`LegPartSpec`): a 30 x 30 x 100 mm body and a 25 mm stud.
+- **Frames:** our part frames are the design's (x, -z, y) turned 90 degrees about the assembly axis, so
+  the 210 mm side runs along W y at zero yaw.
+- **Mechanism:** one tray screw with 4 holes. The seat height is 65.625 mm, the pitch 9.375 mm, and the
+  threads right-handed. Each leg counts as assembled in any hole at identity rotation (5 mm per axis,
+  cosine >= 0.94).
+- **Layout:**
+  - The tabletop starts at (0.2415, 0) holes up, with its long side along W y. The legs lie along +x at
+    y = -0.15, -0.08, 0.08 and 0.15, with the stud toward the robot.
+  - Footprints are the design's reset lengths: 150 x 210 mm and 125 x 30 mm.
+  - The tabletop's position noise is [-5, +2] cm on both axes at low and med (the design's override). The
+    3 high presets are converted from the design.
+- **Phases:** `grasp_top`, `place_top_corner` (corner (0.2965, 0.06), yaw checked modulo 180 degrees),
+  then `pick_legN`, `insert_legN`, `screw_legN` for N = 1..4.
+- **Estimated:**
+  - The leg mass is 56.2 g as the design states. Its simulator's density times mesh volume gives 29.4 g.
+  - The stud collision radius is 11.5 mm, as on square_table.
+  - The design's (10, 5, 10) mm position tolerance is replaced by 5 mm on every axis.
+  - The corner fixture is assumed: the design has no desk script.
+  - max_steps is 4500.
+
+## round_table design
+
+`fsim/spec/round_table.py`. Built from primitives (`PrimitivePartSpec`), with dimensions measured on
+FurnitureBench's meshes.
+
+- **Parts** (origin at the centre of each part's collision-geom bounding box):
+  - `round_table_top`, 121.69 g: a 200 mm disc with a 6.25 mm plate and a 6.25 mm rim, 18.75 mm high. A
+    42.5 mm boss in the middle, 32.5 mm high, holds a threaded 25 mm socket, 26.25 mm deep. The table is
+    built upside down, socket up.
+  - `round_table_leg`, 32.28 g: a 65 mm body with a 4-flat collar (33.4 mm across the flats, made of two
+    crossed boxes), then a 42.5 mm cylinder. A 26.25 mm stud is below and a threaded 25 mm socket, 27.5 mm
+    deep, is on top.
+  - `round_table_base`, 33.96 g: a "+"-shaped foot, 130 mm tip to tip and 12.5 mm thick. Its arms are
+    30 mm wide at the ends and narrow to 22 mm at a 40 mm hub. A 27.5 mm stud is below.
+- **Mechanisms:** a chain of two screws, both with a socket site on the parent and the stud on the child:
+  - The leg screws into the top: seated 49.05 mm above the top origin at -175 degrees yaw.
+  - The base screws onto the leg: seated 39.05 mm above the leg origin at +90 degrees yaw.
+  - Both poses match the design's assembled poses, converted into our frames (within the 0.3 mm seat gap).
+- **Layout:**
+  - The top starts socket up at (0.2415, 0). The leg lies along +x with the stud toward the robot. The
+    base stands on its stud tip, as in the design.
+  - Footprints are the design's: 200 x 200 mm for the top, 91 x 42.5 mm for the leg (centred on our
+    origin), and the design's 20 x 20 mm for the base. The base's real 130 mm cross never fits next to the
+    top at the nominal layout.
+  - The top's position noise is [-5, +1] cm at low and med. The 3 high presets are converted.
+- **Phases:** `grasp_top`, `place_top_corner` (corner (0.2715, 0.065), no yaw check), `pick_leg`,
+  `insert_leg`, `screw_leg`, `pick_base`, `insert_base`, `screw_base`.
+- **Spinning top:**
+  - Nothing holds the round top against twisting except table friction, about 0.013-0.015 N*m.
+  - With `thread_friction` 0.01 N*m, a leg or base driven along the thread leaves a free-lying top in place
+    (under 1 degree). At 0.02 N*m the top starts to slip.
+  - Twisting past the seat turns the whole table (the test driver's 24 degrees of overtightening turns it
+    9-13 degrees). See `tests/test_task_round_table.py`.
+- **Estimated:**
+  - Stud collision radius 11.5 mm.
+  - The number of polygon segments in each ring, and where the base arms change width.
+  - The base screw counts as seated within 8 degrees (default 1). When the hand lets go, the hinge stop
+    springs the wide base back about 5 degrees before thread friction holds it. Assembly allows about 20
+    degrees.
+  - 5 mm position tolerance; max_steps 4000.
+  - A lying leg balances on the edge of its cylinder and tips 8-10 degrees onto the collar. The design's
+    measured presets show the same.
+
 ## Screwing: the helical constraint
 
 FurnitureSim screws parts together through thread-on-thread SDF contact in PhysX. MuJoCo would convex-hull
