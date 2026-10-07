@@ -146,6 +146,19 @@ def check_hand_drive(task: TaskSpec, spec, site: int = 0, child: str | None = No
     name = f"{spec.parent}<-{child or spec.children[0]} site {site}"
     assert r.engaged, f"{name}: never engaged ({r.events})"
     assert r.seated, f"{name}: not seated ({r.events})"
+    pair = (spec.parent, child or spec.children[0])
+    reqs = [q for t in task.targets if (t.parent, t.child) == pair for q in t.requires]
+    if r.assembled is False and reqs:          # the target waits for other pairs: force-seat them, then re-check
+        assert not r.assembled
+        for parent, req_child in reqs:
+            req_spec = next(s for s in mechanisms(task) if s.parent == parent and req_child in s.children)
+            mgr = rig.screw if isinstance(req_spec, ScrewSpec) else rig.inserts
+            free = next(h for h in site_holes(rig, req_spec) if h.child is None)
+            mgr.force_seat(req_child, parent, free.index)
+            mujoco.mj_forward(rig.model, rig.data)
+        for _ in range(len(task.targets)):
+            rig.checker.update(rig.state.poses())
+        r.assembled = pair in rig.checker.assembled
     assert r.assembled in (None, True), f"{name}: seated but not assembled"
     return r
 

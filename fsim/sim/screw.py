@@ -109,12 +109,20 @@ class HelicalScrewManager:
                 weld={c: oid(mujoco.mjtObj.mjOBJ_EQUALITY, names.weld_eq(screw.parent, h, c)) for c in screw.children},
                 mate=site.mates,
             ))
+        # Holes at the same spot of one parent (e.g. a second site rotated 180 degrees for a symmetric
+        # child) share one physical catch: it is off while any of them holds a child.
+        self._twins = {id(h): [t for t in self.holes if t.parent == h.parent
+                               and np.linalg.norm(t.T_local[:3, 3] - h.T_local[:3, 3]) < 1e-4] for h in self.holes}
         self._sync_from_eq_active()
 
     # ---------------------------------------------------------------- state sync
     def _set_catch(self, hole: Hole, enabled: bool):
-        self.model.geom_contype[hole.catch_geom] = CATCH_CONTYPE if enabled else 0
-        self.model.geom_conaffinity[hole.catch_geom] = CATCH_CONAFFINITY if enabled else 0
+        for h in self._twins.get(id(hole), [hole]):
+            on = enabled and all(t.child is None for t in self._twins.get(id(h), [h]) if t is not hole)
+            if h is not hole:
+                on = on and h.child is None
+            self.model.geom_contype[h.catch_geom] = CATCH_CONTYPE if on else 0
+            self.model.geom_conaffinity[h.catch_geom] = CATCH_CONAFFINITY if on else 0
 
     def _sync_from_eq_active(self):
         """Make hole.child and the catch switches agree with data.eq_active (source of truth)."""
