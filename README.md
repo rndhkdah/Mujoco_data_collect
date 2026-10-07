@@ -215,6 +215,36 @@ bash stack.sh expert --randomness low --episodes 5 --record ~/fsim_expert   # de
   averages of the part friction 0.15 with 0.10 and 1.0, which reproduces the averaging of the design's
   simulator.
 
+## stool and lamp design
+
+Both are measured from the design's part geometry and rebuilt from primitives. Threads use the square_table
+family (9.375 mm pitch, 11.5 mm stud, 12.5 mm bore, 1.5 turns from catch to seat). In the design the
+stud tips touch the hole floors when seated; here studs are 0.5 mm shorter so the screw stop sets the
+pose. Neither task has a scripted expert, auto-screw or reach check yet.
+
+- **stool** (`fsim/spec/stool.py`): 3 targets, phases grasp_seat, place_seat_corner, then pick / insert /
+  screw for leg3, leg2, leg1.
+  - Seat: Ø100 x 30 mm open tray, holes up, 57.3 g. 2.5 mm plate, 2 mm rim (the grasp: Ø100 is too wide
+    for the 2F-85), threaded bosses at r 32.5 mm, 120 degrees apart. The place_corner check ignores yaw.
+  - Legs: 35 x 35 x 60 mm body sheared 15 degrees (12 stepped slabs), 27.1 g, vertical stud under the
+    bottom-face centre. Any leg fits any socket; each site's yaw seats the leg leaning outward, 40.5 mm
+    from the seat axis and 45 mm above it (matches the design's assembled poses to 0.4 mm).
+  - The leg's grip point is 3 to 8 mm off its screw axis, so twisting about the gripper axis fights the
+    thread; grasp the leg low.
+- **lamp** (`fsim/spec/lamp.py`): targets bulb (screwed) and hood (position-only, requires the bulb);
+  phases grasp_base, place_base_corner, pick / insert / screw_bulb, pick_hood, place_hood.
+  - Base: 84.7 mm square foot, stepped loft, neck and a 55.2 mm square top plate (the grasp) around the
+    bore, 63 mm tall, 59.7 g.
+  - Bulb: stud, collar, 35 mm body and globe, 38.5 g; lying, it rests on globe and collar at about 8
+    degrees (design 8.3). Estimated: globe 29.5 mm (design 30) and collar 21.6 mm (design 22.2), which
+    keep that tilt while giving the hood more room around the globe.
+  - Hood: open conical shell (Ø88 to Ø60 over 100 mm, 4 mm wall) of 24 tilted staves, 60 g. It rests
+    with its inside on the top plate's corners, 72.2 to 74.6 mm above the base origin depending on its
+    yaw (design 75.4); the target (73.4 mm, 5 mm tolerance) holds at every yaw. Grasp it outside near the
+    narrow top (about 60 mm): the design's wall pinch puts a finger inside, where the globe is.
+- Estimated, not measured precisely: the base loft steps, the seat hub, plate thicknesses, and the
+  stepped leg shear. Layouts, footprints and the three measured "high" layouts follow the design.
+
 ## Screwing: the helical constraint
 
 FurnitureSim screws parts together through thread-on-thread SDF contact in PhysX. MuJoCo would convex-hull
