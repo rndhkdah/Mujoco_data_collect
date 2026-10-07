@@ -13,7 +13,7 @@ from fsim.models.parts import mechanism_sites, parts_aabb
 from fsim.models.scene import build_scene_xml
 from fsim.sim.assembly import AssemblyChecker
 from fsim.sim.reset import ResetSampler, max_penetration, place_and_settle
-from fsim.sim.screw_trials import Rig, drive_site, site_holes
+from fsim.sim.screw_trials import Rig, axis_up_pose, drive_site, site_holes
 from fsim.sim.state import PartState
 from fsim.spec.types import PHASE_KINDS, PrimitivePartSpec, ScrewSpec, TaskSpec
 
@@ -142,8 +142,20 @@ def check_force_seat(task: TaskSpec, settle_s: float = 0.5):
 def check_hand_drive(task: TaskSpec, spec, site: int = 0, child: str | None = None, **kw):
     """Hand-drive one child into one site; it must engage, seat, and (if targeted) be assembled."""
     rig = Rig(task)
+    child = child or spec.children[0]
+    reqs = [r for t in task.targets if (t.parent, t.child) == (spec.parent, child) for r in t.requires]
+    if reqs:                                    # seat what the target requires first (e.g. a chair back before its nuts)
+        if kw.get("parent_T") is None:
+            hole = site_holes(rig, spec)[site]
+            kw["parent_T"] = axis_up_pose(hole.T_local, np.asarray(task.scene.W_origin) + (0.1, 0.0, 0.35))
+        rig.hold(spec.parent, kw["parent_T"])
+        for parent, req_child in reqs:
+            req = next(m for m in mechanisms(task) if m.parent == parent and req_child in m.children)
+            mgr = rig.screw if isinstance(req, ScrewSpec) else rig.inserts
+            mgr.force_seat(req_child, parent, next(h.index for h in site_holes(rig, req) if h.child is None))
+        mujoco.mj_forward(rig.model, rig.data)
     r = drive_site(rig, spec, site, child, **kw)
-    name = f"{spec.parent}<-{child or spec.children[0]} site {site}"
+    name = f"{spec.parent}<-{child} site {site}"
     assert r.engaged, f"{name}: never engaged ({r.events})"
     assert r.seated, f"{name}: not seated ({r.events})"
     assert r.assembled in (None, True), f"{name}: seated but not assembled"
