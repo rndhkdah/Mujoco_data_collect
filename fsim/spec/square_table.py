@@ -151,8 +151,8 @@ SCENE = SceneSpec(
         CameraSpec("rear", _REAR_POS,
                    (_REAR_POS[0] + math.cos(math.radians(35)), 0.0, _REAR_POS[2] - math.sin(math.radians(35))),
                    fovy=40.0),
-        # Beside the table's long edge on the robot's left (the fence-corner side), looking across the workspace.
-        CameraSpec("side", (0.2, 0.80, 0.78), (0.2, 0.0, 0.52), fovy=50.0),
+        # At the VR operator's mean head pose over the one_leg demos (robot's left, looking down across the table).
+        CameraSpec("side", (0.27, 0.59, 1.04), (0.25, -0.05, 0.45), fovy=60.0),
         # Above the table's far corner on the robot's left, looking down across the workspace at the arm.
         CameraSpec("corner", (0.70, 0.45, 1.15), (0.05, 0.0, 0.55), fovy=60.0),
         # The VR operator's view (--record-operator): the collector moves it to the headset pose each

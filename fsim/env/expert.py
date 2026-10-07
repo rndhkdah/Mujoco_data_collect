@@ -46,6 +46,9 @@ APPROACH_OFFSET = math.radians(45.0)
 INSERT_ABOVE = 0.015             # start lowering with the stud this far above the thread catch
 INSERT_SPEED = 0.015             # m/s
 REGRASP_ABOVE = 0.02             # regrasp the standing leg this far above its origin
+# Over some holes (e.g. near the fence corner) the OSC settles ~2.2 mm off the regrasp pose; the open
+# fingers clear the leg by ~24 mm a side, so a 2 mm tolerance failed descents that would have worked.
+REGRASP_TOL = 0.004
 TWIST_RATE = math.radians(90.0)  # wrist turn rate while screwing (rad/s)
 MAX_TWIST_LEAD = math.radians(25.0)   # the twist target stops running ahead of the wrist beyond this
 _DOWN = gripper_down(0.0)
@@ -234,7 +237,7 @@ class OneLegExpert:
         grasp = np.r_[seat[:2, 3], T[2, 3] + REGRASP_ABOVE]
         arm.gripper = -1.0
         self._transit(grasp[:2], R, z=LEG_LIFT_Z)                           # clear the standing leg
-        self._check(arm.move_linear(grasp, R, speed=0.06, tol=0.002), "descend onto the standing leg")
+        self._check(arm.move_linear(grasp, R, speed=0.06, tol=REGRASP_TOL), "descend onto the standing leg")
         arm.grip(True, 15)
         self._check(env.grasped(self.leg), "regrasp the leg")
         rate = TWIST_RATE / env.control_freq
