@@ -78,7 +78,7 @@ class OneLegExpert:
         self.arm = ScriptedArm(env, step_fn=step_fn)
         t = env.task
         self.screw_spec = t.screws[0]
-        self.top, self.leg = self.screw_spec.parent, t.extras["target_leg"]
+        self.top, self.leg = self.screw_spec.parent, t.extras["target_child"]
         self.top_spec, self.leg_spec = t.part(self.top), t.part(self.leg)
         self.W = np.asarray(t.scene.W_origin, float)
         self.log = log or (lambda msg: None)

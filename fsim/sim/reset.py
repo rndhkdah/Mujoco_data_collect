@@ -75,7 +75,7 @@ class ResetSampler:
         return ok
 
     def sample(self, rng: np.random.Generator, level: str = "low", high_index: int | None = None,
-               max_tries: int = 300_000, batch: int = 4096) -> tuple[Placement, ...]:
+               max_tries: int | None = None, batch: int = 4096) -> tuple[Placement, ...]:
         """Joint rejection sampling (the design's distribution), evaluated in numpy batches."""
         if level == "none":
             return self.task.layout
@@ -86,8 +86,18 @@ class ResetSampler:
         lv = self.spec.levels[level]
         base = np.array([pl.pos[:2] for pl in self.task.layout])
         n = len(self.task.layout)
+        max_tries = max_tries or self.spec.max_tries
+        lo = hi = None
+        over = self.spec.part_pos_range.get(level, {})
+        if over:
+            rngs = [over.get(pl.part, ((-lv.pos_range, lv.pos_range),) * 2) for pl in self.task.layout]
+            lo = np.array([[r[0][0], r[1][0]] for r in rngs])
+            hi = np.array([[r[0][1], r[1][1]] for r in rngs])
         for _ in range(0, max_tries, batch):
-            xy = base + rng.uniform(-lv.pos_range, lv.pos_range, size=(batch, n, 2))
+            if lo is None:
+                xy = base + rng.uniform(-lv.pos_range, lv.pos_range, size=(batch, n, 2))
+            else:
+                xy = base + rng.uniform(lo, hi, size=(batch, n, 2))
             yaw = np.radians(rng.uniform(-lv.yaw_range_deg, lv.yaw_range_deg, size=(batch, n)))
             hits = np.flatnonzero(self._valid_batch(xy, yaw))
             if hits.size:

@@ -251,6 +251,29 @@ Spike S1 (MuJoCo 3.3.7) results:
 - Engagement never happens off the hole, when tilted 15 degrees, or when twisting the wrong way.
 - The standalone scene runs at about 15-19x real time with the manager updating every physics step.
 
+## Adding a task (generic parts and mechanisms)
+
+- **Parts:** `PrimitivePartSpec(name, mass, geoms, studs, sockets)` in `fsim/spec/types.py`. Geoms are
+  box / cylinder / capsule / sphere with local pos + quat; the origin must be the centre of the geoms'
+  bounding box. Each stud adds a collision cylinder. Sockets are visual only, so the collision geoms must
+  leave the bore clear (`fsim.spec.common.ring_geoms`). The visual mesh is CSG (geoms - sockets + studs,
+  helical ridges), with primitive visuals as the fallback. Inertia comes from the geoms unless `com` /
+  `inertia` override it.
+- **Feature frames:** the origin is on the part surface and +z points out of the part. Mated, the child
+  feature sits on the parent site with z anti-parallel.
+- **Screws:** `ScrewSpec(..., sites=(site_at(socket_or_stud), ...), child_feature=...)` takes any parent
+  and any axis. The child can own the stud (catch cylinder inside the bore), or the parent can own it
+  (nut: the catch is a collar of `catch_radius` around the stud). Chains work, so a child of one screw can
+  be the parent of another. Without `sites`, the tray `hole_centers` are used as before.
+- **Inserts:** `InsertSpec` is the slide-only version, managed by `env.inserts` next to `env.screw`.
+- **Phases:** `Phase(kind, part, target, label)`, with the kinds listed in `Phase`.
+- **Assembled poses:** `seated_rel_pose()` gives the seated poses for `AssemblyTarget.rel_poses`.
+- **Tests:** `tests/test_tasks_generic.py` checks every registered task. `tests/synthetic_task.py` shows
+  every mechanism.
+- **Mesh paths:** `fsim/models/meshes.py` defines the mesh directory hash of the tray/leg tasks. Leave it
+  unchanged, or recorded demos lose their mesh paths. New generator code goes in
+  `fsim/models/part_meshes.py`.
+
 ## Notes for the Linux collection box
 
 - robosuite 1.4.0 cannot run on the Windows dev laptop: Windows Application Control blocks numba's DLL, and

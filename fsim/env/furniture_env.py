@@ -1,7 +1,7 @@
 """KinovaFurnitureEnv: FurnitureBench-style assembly tasks in robosuite 1.4 (Kinova3 + Robotiq 2F-85).
 
 Per step: robosuite runs the OSC controller every physics substep; `_pre_action` also runs the
-helical screw manager there. `reward` is the number of newly assembled pairs (latching), and
+helical screw manager (`env.screw`) and the insert manager (`env.inserts`) there. `reward` is the number of newly assembled pairs (latching), and
 `info` carries the phase label and screw events. Reset samples a layout (none/low/med/high),
 places and settles the parts while holding the arm, and re-arms all managers.
 """
@@ -23,9 +23,10 @@ from fsim.env.gripper import menagerie_gripper_xml
 from fsim.env.objects import build_part_objects
 from fsim.geometry import mat_to_quat
 from fsim.models import names
-from fsim.models.meshes import build_task_meshes, generated_dir
+from fsim.models.part_meshes import build_task_meshes, generated_dir
 from fsim.models.parts import build_screw_equalities
 from fsim.sim.assembly import AssemblyChecker
+from fsim.sim.insert import InsertManager
 from fsim.sim.phases import PhaseTracker
 from fsim.sim.reset import ResetSampler, place_and_settle
 from fsim.sim.screw import HelicalScrewManager
@@ -85,7 +86,7 @@ class KinovaFurnitureEnv(SingleArmEnv):
         self.checker = AssemblyChecker(self.task)
         self.layout = self.task.layout
         self.phases = PhaseTracker(self.task, grasped=self.grasped)
-        self._event_cursor = 0
+        self._event_cursor = self._insert_cursor = 0
         self.controller_configs_arg = copy.deepcopy(controller_configs)   # JSON-safe copy for env_args
         super().__init__(
             robots=robots, env_configuration="default", controller_configs=controller_configs,
@@ -119,6 +120,7 @@ class KinovaFurnitureEnv(SingleArmEnv):
         m.opt.enableflags |= int(mujoco.mjtEnableBit.mjENBL_MULTICCD)
         self.part_state = PartState(m, d, self.task)
         self.screw = HelicalScrewManager(m, d, self.task)
+        self.inserts = InsertManager(m, d, self.task)
         self.part_geoms = {}
         for p, b in self.part_state.body_id.items():
             self.part_geoms[p] = [mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g) for g in range(m.ngeom)
@@ -140,8 +142,9 @@ class KinovaFurnitureEnv(SingleArmEnv):
         super()._reset_internal()
         m, d = self.sim.model._model, self.sim.data._data
         self.screw.reset()
+        self.inserts.reset()
         self.checker.reset()
-        self._event_cursor = 0
+        self._event_cursor = self._insert_cursor = 0
         r = self.robots[0]
         self._held_q = d.qpos[r._ref_joint_pos_indexes].copy()
         self._held_gq = d.qpos[r._ref_gripper_joint_pos_indexes].copy() if r._ref_gripper_joint_pos_indexes is not None else None
@@ -155,14 +158,15 @@ class KinovaFurnitureEnv(SingleArmEnv):
     def _pre_action(self, action, policy_step=False):
         super()._pre_action(action, policy_step)
         self.screw.update()
+        self.inserts.update()
 
     def _post_action(self, action):
         reward, done, info = super()._post_action(action)
         poses_W = self.parts_poses_W()
-        info["skill"] = bool(self.phases.update(poses_W, self.screw, self.checker.assembled))
+        info["skill"] = bool(self.phases.update(poses_W, self.screw, self.checker.assembled, self.inserts))
         info["phase"] = self.phases.phase
-        info["screw_events"] = self.screw.events[self._event_cursor:]
-        self._event_cursor = len(self.screw.events)
+        info["screw_events"] = self.screw.events[self._event_cursor:] + self.inserts.events[self._insert_cursor:]
+        self._event_cursor, self._insert_cursor = len(self.screw.events), len(self.inserts.events)
         info["success"] = self._check_success()
         return reward, done, info
 
@@ -205,13 +209,15 @@ class KinovaFurnitureEnv(SingleArmEnv):
 
     def fsim_snapshot(self) -> dict:
         """Task state not contained in the MuJoCo state (for recording and replay)."""
-        return {"screw": self.screw.snapshot(), "assembled": sorted(map(list, self.checker.assembled)),
+        return {"screw": self.screw.snapshot(), "inserts": self.inserts.snapshot(),
+                "assembled": sorted(map(list, self.checker.assembled)),
                 "phase": self.phases.phase,
                 "gripper_action": float(self.robots[0].gripper.current_action[0])}
 
     def restore_snapshot(self, snap: dict):
         """Re-apply task state recorded by fsim_snapshot (after restoring the MuJoCo state)."""
         self.screw.restore(snap["screw"])
+        self.inserts.restore(snap.get("inserts", {}))
         self.checker.assembled = {tuple(p) for p in snap.get("assembled", [])}
         self.phases.phase = int(snap.get("phase", 0))
         self.robots[0].gripper.current_action = np.array([snap.get("gripper_action", -1.0)])

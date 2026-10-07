@@ -25,7 +25,7 @@ def targets(env):
     """(label, W-frame position, rotation) of the poses the task needs."""
     t = env.task
     top = t.part(t.screws[0].parent)
-    leg = t.part(t.extras.get("target_leg", t.screws[0].children[0]))
+    leg = t.part(t.extras.get("target_child", t.screws[0].children[0]))
     s = t.screws[0]
     lv = t.randomization.levels["med"].pos_range
     out = [("home", HOME_TARGET_W, gripper_down())]

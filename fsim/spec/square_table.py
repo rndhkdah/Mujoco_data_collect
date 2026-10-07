@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import math
 
-import numpy as np
-
-from fsim.geometry import mat_to_quat, orthonormalize, rot_y
+from fsim.geometry import mat_to_quat, rot_y
+from fsim.spec.common import (  # noqa: F401  (re-exported: existing imports use fsim.spec.square_table)
+    FENCE_FRONT, FENCE_LEFT, FENCE_RIGHT, LOW, MED, OPERATOR_CAMERA, RESET_OBSTACLES, ROBOT_BASE, SCENE, _C, _M,
+    corner_extras, tag_pose_to_placement,
+)
 from fsim.spec.types import (
-    IDENTITY_QUAT, AssemblyTarget, BoxObstacle, CameraSpec, LegPartSpec, Placement,
-    RandomizationSpec, RandomLevel, SceneSpec, ScrewSpec, TaskSpec, ThreadSpec, TrayPartSpec,
+    IDENTITY_QUAT, AssemblyTarget, LegPartSpec, Phase, Placement, RandomizationSpec, ScrewSpec, TaskSpec,
+    ThreadSpec, TrayPartSpec,
 )
 
 TOP = "square_table_top"
@@ -72,13 +74,7 @@ LAYOUT = (
 )
 
 # --- High-randomness presets ---------------------------------------------------------------
-# FurnitureBench defines three measured layouts for "high" randomness. They are recorded in its
-# AprilTag base-tag frame and part frames, and converted here into W and our part frames:
-#   tag frame -> W:   p_W = (0.0015 + p_y, p_x, -p_z),  R_W = M @ R_tag
-#   their part frame -> ours: our (x, y, z) axes = their (x, -z, y)  ->  R_ours = R_W @ C
-_M = np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0]])
-_C = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]])
-
+# FurnitureBench's three measured layouts, in its AprilTag base-tag frame (see tag_pose_to_placement).
 _HIGH_TAG_DATA = {
     TOP: [
         ((0.00165764, 0.23166147, -0.01571113), ((-0.22164249, -0.00542635, -0.97511292), (0.97511977, -0.00533661, -0.22161436), (-0.00400126, -0.99997103, 0.00647417))),
@@ -108,27 +104,13 @@ _HIGH_TAG_DATA = {
 }
 
 
-def tag_pose_to_placement(part: str, pos_tag, rot_tag) -> Placement:
-    """Convert a FurnitureBench base-tag-frame part pose into a W-frame Placement."""
-    p = np.asarray(pos_tag, dtype=float)
-    R = orthonormalize(_M @ np.asarray(rot_tag, dtype=float) @ _C)
-    return Placement(part, (0.0015 + p[1], p[0], -p[2]), tuple(mat_to_quat(R)))
-
-
 HIGH_PRESETS = tuple(
     tuple(tag_pose_to_placement(part, *_HIGH_TAG_DATA[part][i]) for part in (TOP,) + LEGS)
     for i in range(3)
 )
 
-# Reset rectangles of the design (they sit 2 cm closer to the parts than the built fence).
-RESET_OBSTACLES = (
-    BoxObstacle("reset_front", (0.3615, 0.0, 0.0), (0.01, 0.175, 0.015)),
-    BoxObstacle("reset_left", (0.3065, 0.175, 0.0), (0.085, 0.01, 0.015)),
-    BoxObstacle("reset_right", (0.3065, -0.175, 0.0), (0.085, 0.01, 0.015)),
-)
-
 RANDOMIZATION = RandomizationSpec(
-    levels={"low": RandomLevel(0.015, 15.0), "med": RandomLevel(0.05, 45.0)},
+    levels={"low": LOW, "med": MED},
     bounds_x=(0.0715, 0.3715),
     bounds_y=(-0.21, 0.21),
     footprints={TOP: (0.1625, 0.1625), **{leg: (0.0875, 0.05) for leg in LEGS}},
@@ -137,36 +119,18 @@ RANDOMIZATION = RandomizationSpec(
     high_presets=HIGH_PRESETS,
 )
 
-FENCE_FRONT = BoxObstacle("fence_front", (0.3815, 0.0, 0.015), (0.01, 0.175, 0.015))
-FENCE_LEFT = BoxObstacle("fence_left", (0.3065, 0.175, 0.015), (0.085, 0.01, 0.015))
-FENCE_RIGHT = BoxObstacle("fence_right", (0.3065, -0.175, 0.015), (0.085, 0.01, 0.015))
-ROBOT_BASE = (-0.3, 0.0, 0.43)
-OPERATOR_CAMERA = "operator"
-_REAR_POS = (ROBOT_BASE[0] + 0.08, 0.0, ROBOT_BASE[2] + 0.2)
-SCENE = SceneSpec(
-    robot_base=ROBOT_BASE,
-    obstacles=(FENCE_FRONT, FENCE_LEFT, FENCE_RIGHT),
-    cameras=(
-        CameraSpec("front", (0.90, 0.0, 0.65), (-1.0, 0.0, 0.30), fovy=40.0),
-        CameraSpec("rear", _REAR_POS,
-                   (_REAR_POS[0] + math.cos(math.radians(35)), 0.0, _REAR_POS[2] - math.sin(math.radians(35))),
-                   fovy=40.0),
-        # At the VR operator's mean head pose over the one_leg demos (robot's left, looking down across the table).
-        CameraSpec("side", (0.27, 0.59, 1.04), (0.25, -0.05, 0.45), fovy=60.0),
-        # Above the table's far corner on the robot's left, looking down across the workspace at the arm.
-        CameraSpec("corner", (0.70, 0.45, 1.15), (0.05, 0.0, 0.55), fovy=60.0),
-        # The VR operator's view (--record-operator): the collector moves it to the headset pose each
-        # step. This default is the page's starting viewpoint, at the robot's left-rear.
-        CameraSpec(OPERATOR_CAMERA, (-0.62, 0.475, 1.015), (0.2, 0.0, 0.415), fovy=90.0),
-    ),
-)
-
 # Phase-2 target: the tabletop pushed snug into the +y corner of the built fence.
-CORNER_XY = (FENCE_FRONT.center[0] - FENCE_FRONT.half_size[0] - TOP_SPEC.size[0] / 2,
-             FENCE_LEFT.center[1] - FENCE_LEFT.half_size[1] - TOP_SPEC.size[1] / 2)
-_CORNER = {"corner_xy": CORNER_XY, "corner_tol": 0.02, "corner_yaw_tol_deg": 15.0}
+_CORNER = corner_extras(TOP_SPEC.size[0], TOP_SPEC.size[1])
+CORNER_XY = _CORNER["corner_xy"]
 
-PHASES = ("grasp_top", "place_top_corner", "pick_leg", "insert_leg", "screw_leg")
+
+def _leg_phases(leg: str, suffix: str) -> tuple[Phase, ...]:
+    return (Phase("pick", leg, label=f"pick_{suffix}"), Phase("insert", leg, TOP, f"insert_{suffix}"),
+            Phase("screw", leg, TOP, f"screw_{suffix}"))
+
+
+_TOP_PHASES = (Phase("grasp", TOP, label="grasp_top"), Phase("place_corner", TOP, label="place_top_corner"))
+PHASES = _TOP_PHASES + _leg_phases(LEGS[3], "leg")
 
 _COMMON = dict(
     parts=(TOP_SPEC,) + LEG_SPECS,
@@ -180,7 +144,7 @@ ONE_LEG = TaskSpec(
     name="one_leg",
     targets=(_corner_targets(LEGS[3]),),
     phases=PHASES,
-    extras={"target_leg": LEGS[3], **_CORNER},
+    extras={"target_child": LEGS[3], "target_leg": LEGS[3], **_CORNER},
     **_COMMON,
 )
 
@@ -188,8 +152,7 @@ _SQUARE_ORDER = (LEGS[3], LEGS[2], LEGS[0], LEGS[1])
 SQUARE_TABLE = TaskSpec(
     name="square_table",
     targets=tuple(_corner_targets(leg) for leg in _SQUARE_ORDER),
-    phases=("grasp_top", "place_top_corner") + tuple(
-        f"{step}_{leg[-4:]}" for leg in _SQUARE_ORDER for step in ("pick", "insert", "screw")),
+    phases=_TOP_PHASES + tuple(ph for leg in _SQUARE_ORDER for ph in _leg_phases(leg, leg[-4:])),
     max_steps=4500,
     extras=dict(_CORNER),
     **_COMMON,

@@ -1,7 +1,7 @@
 """Helical screw joints for threaded part connections.
 
-Each threaded hole owns a virtual carriage (child body of the parent part, placed at the seated
-child pose) with a slide and a hinge along the hole axis. An always-on joint equality couples
+Each threaded hole (tray hole or ScrewSpec site) owns a virtual carriage (child body of the parent
+part, placed at the seated child mate frame) with a slide and a hinge along the hole axis. An always-on joint equality couples
 them, hinge = (2*pi/pitch) * slide, so the carriage can only move along the thread helix. When a
 child's stud rests on the hole's catch and its twist crosses the thread-start phase while
 tightening, the carriage is snapped to the child's pose, the hole's catch geom is switched off
@@ -34,8 +34,8 @@ import numpy as np
 
 from fsim.geometry import inv_T, make_T, mat_to_quat, quat_to_mat, wrap_angle
 from fsim.models import names
-from fsim.models.parts import CATCH_CONAFFINITY, CATCH_CONTYPE
-from fsim.spec.types import ScrewSpec, TaskSpec, TrayPartSpec
+from fsim.models.parts import CATCH_CONAFFINITY, CATCH_CONTYPE, mechanism_sites
+from fsim.spec.types import ScrewSpec, TaskSpec
 
 FREE, ENGAGED, SEATED = "free", "engaged", "seated"
 
@@ -54,6 +54,7 @@ class Hole:
     slide_v: int
     catch_geom: int
     weld: dict[str, int]
+    mate: dict[str, np.ndarray | None]   # child mate frame in the child frame (None: child origin)
     child: str | None = None
 
     @property
@@ -90,23 +91,24 @@ class HelicalScrewManager:
                 raise KeyError(f"{name} not found in model")
             return i
 
-        for screw in task.screws:
-            parent = task.part(screw.parent)
-            assert isinstance(parent, TrayPartSpec), "screw parents must be tray parts"
+        for site in mechanism_sites(task):
+            if not site.is_screw:
+                continue
+            screw, h = site.spec, site.index
             for part in (screw.parent,) + screw.children:
                 self.body_id[part] = oid(mujoco.mjtObj.mjOBJ_BODY, names.body(part))
-            for h in range(len(parent.hole_centers)):
-                cb = oid(mujoco.mjtObj.mjOBJ_BODY, names.carriage(screw.parent, h))
-                hj = oid(mujoco.mjtObj.mjOBJ_JOINT, names.hinge_joint(screw.parent, h))
-                sj = oid(mujoco.mjtObj.mjOBJ_JOINT, names.slide_joint(screw.parent, h))
-                self.holes.append(Hole(
-                    screw=screw, parent=screw.parent, index=h, parent_body=self.body_id[screw.parent],
-                    T_local=make_T(model.body_pos[cb], quat_to_mat(model.body_quat[cb])),
-                    hinge_jnt=hj, hinge_q=model.jnt_qposadr[hj], hinge_v=model.jnt_dofadr[hj],
-                    slide_q=model.jnt_qposadr[sj], slide_v=model.jnt_dofadr[sj],
-                    catch_geom=oid(mujoco.mjtObj.mjOBJ_GEOM, names.catch_geom(screw.parent, h)),
-                    weld={c: oid(mujoco.mjtObj.mjOBJ_EQUALITY, names.weld_eq(screw.parent, h, c)) for c in screw.children},
-                ))
+            cb = oid(mujoco.mjtObj.mjOBJ_BODY, names.carriage(screw.parent, h))
+            hj = oid(mujoco.mjtObj.mjOBJ_JOINT, names.hinge_joint(screw.parent, h))
+            sj = oid(mujoco.mjtObj.mjOBJ_JOINT, names.slide_joint(screw.parent, h))
+            self.holes.append(Hole(
+                screw=screw, parent=screw.parent, index=h, parent_body=self.body_id[screw.parent],
+                T_local=make_T(model.body_pos[cb], quat_to_mat(model.body_quat[cb])),
+                hinge_jnt=hj, hinge_q=model.jnt_qposadr[hj], hinge_v=model.jnt_dofadr[hj],
+                slide_q=model.jnt_qposadr[sj], slide_v=model.jnt_dofadr[sj],
+                catch_geom=oid(mujoco.mjtObj.mjOBJ_GEOM, names.catch_geom(screw.parent, h)),
+                weld={c: oid(mujoco.mjtObj.mjOBJ_EQUALITY, names.weld_eq(screw.parent, h, c)) for c in screw.children},
+                mate=site.mates,
+            ))
         self._sync_from_eq_active()
 
     # ---------------------------------------------------------------- state sync
@@ -127,9 +129,14 @@ class HelicalScrewManager:
     def _body_T(self, body: int) -> np.ndarray:
         return make_T(self.data.xpos[body], self.data.xmat[body].reshape(3, 3))
 
+    def _mate_T(self, child: str, hole: Hole) -> np.ndarray:
+        """World pose of the child's mate frame for this hole."""
+        T, mate = self._body_T(self.body_id[child]), hole.mate[child]
+        return T if mate is None else T @ mate
+
     def measure(self, child: str, hole: Hole) -> Measurement:
-        """Child pose relative to the hole's seated frame (valid after a forward pass)."""
-        rel = inv_T(self._body_T(hole.parent_body) @ hole.T_local) @ self._body_T(self.body_id[child])
+        """Child mate frame relative to the hole's seated frame (valid after a forward pass)."""
+        rel = inv_T(self._body_T(hole.parent_body) @ hole.T_local) @ self._mate_T(child, hole)
         R = rel[:3, :3]
         return Measurement(
             axial=float(rel[2, 3]),
@@ -143,9 +150,11 @@ class HelicalScrewManager:
         return (abs(m.axial - s.travel) < s.engage_axial_tol and m.radial < s.engage_radial_tol
                 and m.tilt_deg < s.engage_tilt_deg)
 
-    def resting_hole(self, child: str) -> Hole | None:
-        """Free hole on whose catch `child` currently rests aligned (inserted, not yet threaded)."""
+    def resting_hole(self, child: str, parent: str | None = None) -> Hole | None:
+        """Free hole (of `parent`, if given) on whose catch `child` rests aligned (inserted, not yet threaded)."""
         for hole in self.holes:
+            if parent is not None and hole.parent != parent:
+                continue
             if hole.child is None and child in hole.weld and self.in_zone(self.measure(child, hole), hole.screw):
                 return hole
         return None
@@ -238,7 +247,8 @@ class HelicalScrewManager:
                 if child in busy:
                     continue
                 track = self._tracks.setdefault((child, hole.key), _PairTrack())
-                if np.linalg.norm(self.data.xpos[self.body_id[child]] - seat_world[:3, 3]) > s.travel + 0.03:
+                pos = self.data.xpos[self.body_id[child]] if hole.mate[child] is None else self._mate_T(child, hole)[:3, 3]
+                if np.linalg.norm(pos - seat_world[:3, 3]) > s.travel + 0.03:
                     track.armed, track.prev_err = False, None      # cheap reject: far from this hole
                     continue
                 m = self.measure(child, hole)
@@ -269,6 +279,8 @@ class HelicalScrewManager:
             raise ValueError(f"{child} is already engaged in {self.child_hole(child).key}")
         mujoco.mj_kinematics(self.model, self.data)
         T = self._body_T(hole.parent_body) @ hole.T_local
+        if hole.mate[child] is not None:
+            T = T @ inv_T(hole.mate[child])
         b = self.body_id[child]
         j = self.model.body_jntadr[b]
         qa, va = self.model.jnt_qposadr[j], self.model.jnt_dofadr[j]

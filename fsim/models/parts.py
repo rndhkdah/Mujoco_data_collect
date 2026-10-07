@@ -12,9 +12,12 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from fsim.geometry import fmt, mat_to_quat, rot_z
+from fsim.geometry import fmt, inv_T, make_T, mat_to_quat, quat_to_mat, rot_z
 from fsim.models import names
-from fsim.spec.types import LegPartSpec, PartSpec, ScrewSpec, TaskSpec, TrayPartSpec
+from fsim.spec.common import child_mate
+from fsim.spec.types import (
+    Geom, InsertSpec, LegPartSpec, PartSpec, PrimitivePartSpec, ScrewSpec, Stud, TaskSpec, TrayPartSpec,
+)
 
 PART_SOLREF = "0.005 1"
 PART_SOLIMP = "0.95 0.99 0.001"
@@ -91,8 +94,66 @@ def _composite(pieces):
     return com, inertia
 
 
+def stud_geom(st: Stud) -> Geom:
+    """Collision cylinder of a stud."""
+    T = make_T(st.pos, quat_to_mat(st.quat)) @ make_T((0.0, 0.0, st.length / 2.0))
+    return Geom("cylinder", (st.radius, st.length / 2.0), tuple(T[:3, 3]), st.quat)
+
+
+def _geom_unit(g: Geom) -> tuple[float, np.ndarray]:
+    """(volume, diag inertia per unit mass about the geom center, in the geom frame)."""
+    if g.type == "box":
+        return 8.0 * g.size[0] * g.size[1] * g.size[2], _box_inertia(1.0, *g.size)
+    if g.type == "sphere":
+        return 4.0 / 3.0 * math.pi * g.size[0] ** 3, np.full(3, 0.4 * g.size[0] ** 2)
+    r, L = g.size[0], 2.0 * g.size[1]
+    vc = math.pi * r * r * L
+    if g.type == "cylinder":
+        return vc, np.array([(3 * r * r + L * L) / 12.0] * 2 + [r * r / 2.0])
+    if g.type == "capsule":
+        vs = 4.0 / 3.0 * math.pi * r ** 3
+        ixx = vc * (L * L / 12.0 + r * r / 4.0) + vs * (0.4 * r * r + L * L / 4.0 + 3.0 * L * r / 8.0)
+        return vc + vs, np.array([ixx, ixx, vc * r * r / 2.0 + vs * 0.4 * r * r]) / (vc + vs)
+    raise ValueError(f"unknown geom type {g.type!r}")
+
+
+def primitive_geoms(spec: PrimitivePartSpec) -> tuple[Geom, ...]:
+    """Collision geoms: the spec geoms plus one cylinder per stud."""
+    return spec.geoms + tuple(stud_geom(st) for st in spec.studs)
+
+
+def geom_aabb(g: Geom) -> tuple[np.ndarray, np.ndarray]:
+    """Axis-aligned bounds (lo, hi) of a geom in the part frame (cylinders as boxes)."""
+    if g.type == "box":
+        h = np.asarray(g.size, float)
+    elif g.type == "sphere":
+        h = np.full(3, g.size[0])
+    else:
+        h = np.array([g.size[0], g.size[0], g.size[1] + (g.size[0] if g.type == "capsule" else 0.0)])
+    ext = np.abs(quat_to_mat(g.quat)) @ h
+    return np.asarray(g.pos) - ext, np.asarray(g.pos) + ext
+
+
+def parts_aabb(geoms) -> tuple[np.ndarray, np.ndarray]:
+    lo, hi = zip(*(geom_aabb(g) for g in geoms))
+    return np.min(lo, axis=0), np.max(hi, axis=0)
+
+
 def part_inertial(spec: PartSpec) -> tuple[np.ndarray, float, np.ndarray]:
-    """(com, mass, diaginertia) in the part frame."""
+    """(com, mass, inertia) in the part frame; inertia is diagonal (3) or full (6: xx yy zz xy xz yz)."""
+    if isinstance(spec, PrimitivePartSpec):
+        pieces = [(*_geom_unit(g), np.asarray(g.pos, float), quat_to_mat(g.quat)) for g in primitive_geoms(spec)]
+        vol = sum(p[0] for p in pieces)
+        com = sum(v * c for v, _, c, _ in pieces) / vol
+        I = np.zeros((3, 3))
+        for v, i_unit, c, R in pieces:
+            d = c - com
+            I += v / vol * (R @ np.diag(i_unit) @ R.T + (d @ d) * np.eye(3) - np.outer(d, d))
+        I *= spec.mass
+        com = com if spec.com is None else np.asarray(spec.com, float)
+        if spec.inertia is not None:
+            return com, spec.mass, np.asarray(spec.inertia, float)
+        return com, spec.mass, np.array([I[0, 0], I[1, 1], I[2, 2], I[0, 1], I[0, 2], I[1, 2]])
     if isinstance(spec, TrayPartSpec):
         pieces = [(8 * b.half[0] * b.half[1] * b.half[2], b.pos, _box_inertia(1.0, *b.half)) for b in tray_boxes(spec)]
         r_in, r_out = spec.bore_radius, spec.boss_outer_radius
@@ -138,11 +199,77 @@ def _add_box(body, name, box: BoxGeom, attrs):
          quat=fmt(q) if q is not None else None, **attrs)
 
 
-def _screw_for_parent(task: TaskSpec, parent: str) -> ScrewSpec | None:
-    for s in task.screws:
-        if s.parent == parent:
-            return s
-    return None
+@dataclass(frozen=True)
+class MechSite:
+    """One screw hole or insert slot, resolved from the specs (shared by the builders and managers)."""
+    spec: ScrewSpec | InsertSpec
+    index: int                       # per parent: hole{index} (screws) or slot{index} (inserts)
+    pos: tuple                       # carriage frame at qpos 0 (= seated child mate frame), parent frame
+    quat: tuple | None               # None: identity (tray holes)
+    catch: tuple | None              # screws: catch cylinder fromto (6), parent frame
+    mates: dict                      # child -> mate frame (4x4) in the child frame; None = child origin
+
+    @property
+    def parent(self) -> str:
+        return self.spec.parent
+
+    @property
+    def is_screw(self) -> bool:
+        return isinstance(self.spec, ScrewSpec)
+
+
+def mechanism_sites(task: TaskSpec) -> list[MechSite]:
+    """Every screw hole (task.screws order) then every insert slot (task.inserts order)."""
+    out, count = [], {}
+    for spec in task.screws + task.inserts:
+        key = (spec.parent, isinstance(spec, ScrewSpec))
+        if isinstance(spec, ScrewSpec) and not spec.sites:            # tray holes (square_table)
+            parent = task.part(spec.parent)
+            assert isinstance(parent, TrayPartSpec), f"{spec.parent}: screws without sites need a tray parent"
+            ztop = catch_top_z(spec, task.part(spec.children[0]))
+            for cx, cy in parent.hole_centers:
+                i = count[key] = count.get(key, -1) + 1
+                out.append(MechSite(spec, i, (cx, cy, spec.seated_z), None,
+                                    (cx, cy, parent.plate_top_z, cx, cy, ztop), {c: None for c in spec.children}))
+            continue
+        gap = spec.seat_gap
+        mates = {c: child_mate(spec, task.part(c)) for c in spec.children}
+        protrude = {round(p, 9) for _, p in mates.values()}
+        if len(protrude) > 1:
+            raise ValueError(f"{spec.parent}: children of one spec must protrude equally ({protrude})")
+        prot = protrude.pop()
+        for site in spec.sites:
+            i = count[key] = count.get(key, -1) + 1
+            T_site = make_T(site.pos, quat_to_mat(site.quat))
+            T = T_site @ make_T((0.0, 0.0, gap))
+            catch = None
+            if isinstance(spec, ScrewSpec):
+                z0, z1 = -site.depth, gap + spec.travel - prot
+                if z1 < z0 + 1e-4:
+                    raise ValueError(f"{spec.parent} site {i}: the catch would sit below the socket floor")
+                catch = tuple((T_site @ [0, 0, z0, 1])[:3]) + tuple((T_site @ [0, 0, z1, 1])[:3])
+            out.append(MechSite(spec, i, tuple(T[:3, 3]), tuple(mat_to_quat(T[:3, :3])), catch,
+                                {c: m for c, (m, _) in mates.items()}))
+    return out
+
+
+def _add_mechanisms(body: ET.Element, task: TaskSpec, part: str, col: dict):
+    """Catch geoms and carriage bodies of every hole / slot on `part`."""
+    for ms in mechanism_sites(task):
+        if ms.parent != part:
+            continue
+        if ms.is_screw:
+            catch = dict(col, contype=CATCH_CONTYPE, conaffinity=CATCH_CONAFFINITY)
+            _sub(body, "geom", name=names.catch_geom(part, ms.index), type="cylinder",
+                 fromto=fmt(ms.catch), size=fmt([ms.spec.catch_radius]), **catch)
+            body.append(_carriage_body(part, ms.index, ms, ms.spec))
+        else:
+            body.append(_slot_body(part, ms))
+
+
+def _add_geom(body, name, g: Geom, attrs):
+    q = None if tuple(g.quat) == (1.0, 0.0, 0.0, 0.0) else fmt(g.quat)
+    _sub(body, "geom", name=name, type=g.type, pos=fmt(g.pos), size=fmt(g.size), quat=q, **attrs)
 
 
 def build_part_body(task: TaskSpec, spec: PartSpec, pos, quat, mesh_assets: dict[str, str] | None = None,
@@ -156,7 +283,8 @@ def build_part_body(task: TaskSpec, spec: PartSpec, pos, quat, mesh_assets: dict
     if free_joint:
         _sub(body, "freejoint", name=names.free_joint(spec.name))
     com, mass, inertia = part_inertial(spec)
-    _sub(body, "inertial", pos=fmt(com), mass=fmt(mass), diaginertia=fmt(inertia))
+    _sub(body, "inertial", pos=fmt(com), mass=fmt(mass),
+         **({"fullinertia": fmt(inertia)} if len(inertia) == 6 else {"diaginertia": fmt(inertia)}))
     col = _collision_attrs(task.part_friction)
     vis = _visual_attrs(spec.rgba)
     mesh_name = (mesh_assets or {}).get(spec.name)
@@ -167,20 +295,13 @@ def build_part_body(task: TaskSpec, spec: PartSpec, pos, quat, mesh_assets: dict
             boxes += boss_ring_boxes(spec, h)
         for i, b in enumerate(boxes):
             _add_box(body, names.elem(n, f"col{i}"), b, col)
-        screw = _screw_for_parent(task, n)
-        if screw is not None:
-            ztop = catch_top_z(screw, task.part(screw.children[0]))
-            catch = dict(col, contype=CATCH_CONTYPE, conaffinity=CATCH_CONAFFINITY)
-            for h, (cx, cy) in enumerate(spec.hole_centers):
-                _sub(body, "geom", name=names.catch_geom(n, h), type="cylinder",
-                     fromto=fmt((cx, cy, spec.plate_top_z, cx, cy, ztop)), size=fmt([screw.catch_radius]), **catch)
-                body.append(_carriage_body(n, h, (cx, cy), screw))
+        _add_mechanisms(body, task, n, col)
         if mesh_name:
             _sub(body, "geom", name=names.elem(n, "vis0"), type="mesh", mesh=mesh_name, **vis)
         else:
             for i, b in enumerate(boxes):
                 _add_box(body, names.elem(n, f"vis{i}"), b, vis)
-    else:
+    elif isinstance(spec, LegPartSpec):
         hw, hl = spec.width / 2, spec.body_length / 2
         _add_box(body, names.elem(n, "col0"), BoxGeom((0, 0, 0), (hw, hw, hl)), col)
         _sub(body, "geom", name=names.elem(n, "col1"), type="cylinder",
@@ -191,17 +312,30 @@ def build_part_body(task: TaskSpec, spec: PartSpec, pos, quat, mesh_assets: dict
         else:
             _sub(body, "geom", name=names.elem(n, "vis1"), type="cylinder",
                  fromto=fmt((0, 0, spec.tip_z, 0, 0, -hl)), size=fmt([spec.thread.major_radius]), **vis)
+        _add_mechanisms(body, task, n, col)
+    else:
+        geoms = primitive_geoms(spec)
+        for i, g in enumerate(geoms):
+            _add_geom(body, names.elem(n, f"col{i}"), g, col)
+        _add_mechanisms(body, task, n, col)
+        if mesh_name:
+            _sub(body, "geom", name=names.elem(n, "vis0"), type="mesh", mesh=mesh_name, **vis)
+        else:
+            for i, g in enumerate(geoms):
+                _add_geom(body, names.elem(n, f"vis{i}"), g, vis)
     return body
 
 
-def _carriage_body(parent: str, hole: int, center, screw: ScrewSpec) -> ET.Element:
-    """Virtual carriage at the seated child pose; its slide+hinge carry the helical DOF.
+def _carriage_body(parent: str, hole: int, site: MechSite, screw: ScrewSpec) -> ET.Element:
+    """Virtual carriage at the seated child pose; its slide+hinge carry the helical DOF (along local z).
 
     The hinge (not the slide) owns the stops and the thread friction: a constraint written as
     slide = K*hinge with K ~ 1.5 mm/rad barely loads the hinge and lets it spin freely.
     """
-    b = ET.Element("body", {"name": names.carriage(parent, hole),
-                            "pos": fmt((center[0], center[1], screw.seated_z)), "gravcomp": "1"})
+    attrs = {"name": names.carriage(parent, hole), "pos": fmt(site.pos)}
+    if site.quat is not None:
+        attrs["quat"] = fmt(site.quat)
+    b = ET.Element("body", dict(attrs, gravcomp="1"))
     _sub(b, "inertial", pos="0 0 0", mass=fmt(screw.carriage_mass), diaginertia="1e-7 1e-7 1e-7")
     _sub(b, "joint", name=names.slide_joint(parent, hole), type="slide", axis="0 0 1",
          armature=fmt(screw.slide_armature), limited="false")
@@ -213,22 +347,42 @@ def _carriage_body(parent: str, hole: int, center, screw: ScrewSpec) -> ET.Eleme
     return b
 
 
+def _slot_body(parent: str, site: MechSite) -> ET.Element:
+    """Insert carriage at the seated child mate frame: one slide along local z, range [0, travel]."""
+    ins: InsertSpec = site.spec
+    b = ET.Element("body", {"name": names.slot_carriage(parent, site.index), "pos": fmt(site.pos),
+                            "quat": fmt(site.quat), "gravcomp": "1"})
+    _sub(b, "inertial", pos="0 0 0", mass=fmt(ins.carriage_mass), diaginertia="1e-7 1e-7 1e-7")
+    _sub(b, "joint", name=names.slot_slide(parent, site.index), type="slide", axis="0 0 1",
+         limited="true", range=fmt((0.0, ins.travel)), armature=fmt(ins.slide_armature), damping="0.0001",
+         solreflimit=CONSTRAINT_SOLREF, solimplimit=CONSTRAINT_SOLIMP)
+    return b
+
+
+def _weld(name: str, body1: str, child: str, mate) -> ET.Element:
+    relpose = "0 0 0 1 0 0 0" if mate is None else fmt(np.r_[inv_T(mate)[:3, 3], mat_to_quat(inv_T(mate)[:3, :3])])
+    return ET.Element("weld", {"name": name, "body1": body1, "body2": names.body(child), "relpose": relpose,
+                               "active": "false", "solref": CONSTRAINT_SOLREF, "solimp": CONSTRAINT_SOLIMP})
+
+
 def build_screw_equalities(task: TaskSpec) -> list[ET.Element]:
-    """Always-on hinge/slide couplings plus one inactive weld per (hole, candidate child)."""
+    """Screws: always-on hinge/slide couplings plus one inactive weld per (hole, candidate child).
+    Inserts: an inactive slide lock plus one inactive weld per (slot, candidate child)."""
     out = []
-    for screw in task.screws:
-        parent = task.part(screw.parent)
-        assert isinstance(parent, TrayPartSpec)
-        for h in range(len(parent.hole_centers)):
+    for ms in mechanism_sites(task):
+        p, h = ms.parent, ms.index
+        if ms.is_screw:
             out.append(ET.Element("joint", {
-                "name": names.couple_eq(screw.parent, h),
-                "joint1": names.hinge_joint(screw.parent, h), "joint2": names.slide_joint(screw.parent, h),
-                "polycoef": fmt((0.0, screw.rad_per_m, 0.0, 0.0, 0.0)),
+                "name": names.couple_eq(p, h),
+                "joint1": names.hinge_joint(p, h), "joint2": names.slide_joint(p, h),
+                "polycoef": fmt((0.0, ms.spec.rad_per_m, 0.0, 0.0, 0.0)),
                 "solref": CONSTRAINT_SOLREF, "solimp": CONSTRAINT_SOLIMP}))
-            for child in screw.children:
-                out.append(ET.Element("weld", {
-                    "name": names.weld_eq(screw.parent, h, child),
-                    "body1": names.carriage(screw.parent, h), "body2": names.body(child),
-                    "relpose": "0 0 0 1 0 0 0", "active": "false",
-                    "solref": CONSTRAINT_SOLREF, "solimp": CONSTRAINT_SOLIMP}))
+            for child in ms.spec.children:
+                out.append(_weld(names.weld_eq(p, h, child), names.carriage(p, h), child, ms.mates[child]))
+        else:
+            out.append(ET.Element("joint", {
+                "name": names.slot_lock_eq(p, h), "joint1": names.slot_slide(p, h),
+                "polycoef": "0 0 0 0 0", "active": "false", "solref": CONSTRAINT_SOLREF, "solimp": CONSTRAINT_SOLIMP}))
+            for child in ms.spec.children:
+                out.append(_weld(names.slot_weld_eq(p, h, child), names.slot_carriage(p, h), child, ms.mates[child]))
     return out

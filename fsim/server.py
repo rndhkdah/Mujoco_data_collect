@@ -107,7 +107,7 @@ def make_publisher(shared: Shared, task, collector_ref: list, env=None, packer=N
     def publish(state, obs, info):
         info = dict(info)
         if "phase" in info and info["phase"] is not None and info["phase"] < len(task.phases):
-            info["phase_name"] = task.phases[info["phase"]]
+            info["phase_name"] = task.phase_labels[info["phase"]]
         elif "phase" in info:
             info["phase_name"] = "done"
         info["saved"] = collector_ref[0].saved if collector_ref else 0

@@ -19,7 +19,7 @@ class FakeScrew:
     def child_state(self, child):
         return self.state.get(child, FREE)
 
-    def resting_hole(self, child):
+    def resting_hole(self, child, parent=None):
         return "hole" if child in self.resting else None
 
 
@@ -52,7 +52,7 @@ def test_insert_waits_for_release_when_grasp_is_known():
     held = {LEGS[3]}
     tr = PhaseTracker(TASK, grasped=lambda p: p in held)
     tr.reset(poses)
-    tr.phase = TASK.phases.index("insert_leg")
+    tr.phase = TASK.phase_labels.index("insert_leg")
     screw = FakeScrew()
     screw.resting.add(LEGS[3])
     assert not tr.update(poses, screw, set())

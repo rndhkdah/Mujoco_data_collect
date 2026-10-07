@@ -20,7 +20,7 @@ import numpy as np
 
 from fsim.data.hdf5_writer import EpisodeRecorder, write_episode
 from fsim.geometry import wxyz_to_xyzw, mat_to_quat
-from fsim.spec.square_table import OPERATOR_CAMERA
+from fsim.spec.common import OPERATOR_CAMERA
 from fsim.teleop.mapping import CONTROLLER_DIM, TeleopConfig, TeleopMapper, controller_vector, head_pose
 
 CAMERA_KEYS = {"front_image": "agentview_rgb", "robot0_eye_in_hand_image": "eye_in_hand_rgb", "rear_image": "rear_rgb",
@@ -206,7 +206,7 @@ class Collector:
 
     def _leg_stands_released(self, out) -> bool:
         """Auto-screw trigger: the target leg stands in a hole, stud on the thread catch, and the gripper has let go."""
-        e, leg = self.env, self.env.task.extras["target_leg"]
+        e, leg = self.env, self.env.task.extras["target_child"]
         return out.gripper < 0 and e.screw.resting_hole(leg) is not None and not e.grasped(leg)
 
     def _auto_screw(self, ep: "_Episode", obs):

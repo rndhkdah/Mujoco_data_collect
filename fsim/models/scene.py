@@ -10,15 +10,20 @@ import numpy as np
 
 from fsim.geometry import fmt, look_at_xyaxes
 from fsim.models import names
-from fsim.models.meshes import build_task_meshes
-from fsim.models.parts import CONSTRAINT_SOLIMP, build_part_body, build_screw_equalities, env_contact_attrs
+from fsim.models.part_meshes import build_task_meshes
+from fsim.models.parts import CONSTRAINT_SOLIMP, CONSTRAINT_SOLREF, build_part_body, build_screw_equalities, env_contact_attrs
 from fsim.spec.types import Placement, TaskSpec
 
 HAND = "hand"
+PIN = "pin"
 
 
 def grasp_eq(part: str) -> str:
     return f"{HAND}_grasp_{part}"
+
+
+def pin_eq(part: str) -> str:
+    return f"{PIN}_{part}"
 
 
 def _sub(parent: ET.Element, tag: str, **attrs) -> ET.Element:
@@ -31,7 +36,8 @@ def build_scene_xml(task: TaskSpec, placements: tuple[Placement, ...] | None = N
 
     placements: initial part poses in W (defaults to the task layout).
     mocap_hand: add a mocap body plus one inactive soft weld per part, used by tests and the
-                spike to emulate a firm grasp without a robot.
+                spike to emulate a firm grasp without a robot, and a second mocap body with one
+                inactive stiff weld per part to pin a part in place (Rig.hold).
     """
     scene = task.scene
     W = np.asarray(scene.W_origin)
@@ -70,6 +76,7 @@ def build_scene_xml(task: TaskSpec, placements: tuple[Placement, ...] | None = N
         world.append(build_part_body(task, task.part(pl.part), W + np.asarray(pl.pos), pl.quat, mesh_assets))
     if mocap_hand:
         _sub(world, "body", name=HAND, mocap="true", pos="0 0 1.0")
+        _sub(world, "body", name=PIN, mocap="true", pos="0 0 1.0")
 
     eq = _sub(root, "equality")
     for e in build_screw_equalities(task):
@@ -78,6 +85,9 @@ def build_scene_xml(task: TaskSpec, placements: tuple[Placement, ...] | None = N
         for p in task.parts:
             _sub(eq, "weld", name=grasp_eq(p.name), body1=HAND, body2=names.body(p.name),
                  relpose="0 0 0 1 0 0 0", active="false", solref="0.02 1", solimp=CONSTRAINT_SOLIMP)
+        for p in task.parts:
+            _sub(eq, "weld", name=pin_eq(p.name), body1=PIN, body2=names.body(p.name),
+                 relpose="0 0 0 1 0 0 0", active="false", solref=CONSTRAINT_SOLREF, solimp=CONSTRAINT_SOLIMP)
     ET.indent(root)
     return ET.tostring(root, encoding="unicode")
 

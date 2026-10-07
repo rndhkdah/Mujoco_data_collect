@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 
-from fsim.models.meshes import build_task_meshes
+from fsim.models.part_meshes import build_task_meshes
 from fsim.spec import TASKS
 
 

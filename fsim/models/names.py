@@ -40,3 +40,19 @@ def couple_eq(parent: str, hole: int) -> str:
 
 def weld_eq(parent: str, hole: int, child: str) -> str:
     return elem(parent, f"hole{hole}_weld_{child}")
+
+
+def slot_carriage(parent: str, slot: int) -> str:
+    return elem(parent, f"slot{slot}_carriage")
+
+
+def slot_slide(parent: str, slot: int) -> str:
+    return elem(parent, f"slot{slot}_slide")
+
+
+def slot_lock_eq(parent: str, slot: int) -> str:
+    return elem(parent, f"slot{slot}_lock")
+
+
+def slot_weld_eq(parent: str, slot: int, child: str) -> str:
+    return elem(parent, f"slot{slot}_weld_{child}")
