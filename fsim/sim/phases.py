@@ -59,13 +59,14 @@ class PhaseTracker:
         if kind == "place_corner":
             T = poses_W[part]
             near = np.linalg.norm(T[:2, 3] - np.asarray(x["corner_xy"])) < x["corner_tol"]
+            yaw = yaw_of(T[:3, :3]) - math.radians(ph.yaw_deg)
             if ph.yaw_sym_deg is None:
                 yaw_ok = True
             elif ph.yaw_sym_deg == 90.0:             # the original expression, kept bit-for-bit
-                yaw_ok = math.degrees(abs((yaw_of(T[:3, :3]) + math.pi / 4) % (math.pi / 2) - math.pi / 4)) < x["corner_yaw_tol_deg"]
+                yaw_ok = math.degrees(abs((yaw + math.pi / 4) % (math.pi / 2) - math.pi / 4)) < x["corner_yaw_tol_deg"]
             else:
                 per = math.radians(ph.yaw_sym_deg)
-                yaw_ok = math.degrees(abs((yaw_of(T[:3, :3]) + per / 2) % per - per / 2)) < x["corner_yaw_tol_deg"]
+                yaw_ok = math.degrees(abs((yaw + per / 2) % per - per / 2)) < x["corner_yaw_tol_deg"]
             return near and yaw_ok and self._held(part) is not True
         if kind == "pick":
             lifted = poses_W[part][2, 3] - self.initial[part][2, 3] > LIFT_HEIGHT
