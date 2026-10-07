@@ -435,6 +435,91 @@ Spike S1 (MuJoCo 3.3.7) results:
   unchanged, or recorded demos lose their mesh paths. New generator code goes in
   `fsim/models/part_meshes.py`.
 
+## drawer / cabinet design
+
+Both tasks follow the FurnitureBench drawer and cabinet designs. The dimensions were measured from the
+design's meshes and rebuilt as primitives (`fsim/spec/drawer.py`, `fsim/spec/cabinet.py`). Layouts are the
+design's skill-0 reset poses and its 3 measured high layouts, converted with `tag_pose_to_placement`.
+Footprints are the real part extents. Assembly tolerances are 5 mm per axis and cosine 0.94, as for
+square_table. Numbers marked EST are our choices, not measurements.
+
+### drawer
+
+- **Parts:**
+  - **drawer_box:** a chest, 112.5 x 121.5 x 97.5 mm, 151.6 g, standing on its +y end (+y points down). Its
+    opening (+z face) holds two drawer slots, with an open tray on top. Each slot has a pair of side rails,
+    r 3 mm (EST; the design uses 3.75).
+  - **drawer_container_top / _bottom:** one shared geometry, 110.25 x 42.75 x 99.75 mm, 59.4 g. It is an open
+    box with a 7.5 mm front panel that is wider than the opening, side grooves for the rails, and a knob.
+- **Mechanism:** one `InsertSpec` with one slot per opening; either container fits either slot.
+  - The slide axis is the box's z, horizontal when the box stands.
+  - travel 85 mm: the container is captured 1 cm before its back reaches the opening, so it never slides in by
+    contact.
+  - Engage tolerances (EST): 4 mm radial, 8 degrees tilt, 8 degrees twist.
+  - The seat is the front panel stopping on the side-wall front edges, with a 0.3 mm gap.
+  - Sliding clearances are 0.5 to 2.25 mm (EST). The walls are widened to 1.5 mm per side.
+  - The design's single slot z fits only one of its two meshes. Our physical seat lies within 3.5 mm of both.
+- **Phases:**
+  1. grasp_box
+  2. place_box_corner: the box snug in the +y fence corner with its opening facing -W y, so the left fence
+     backs it while drawers are pushed in.
+  3. box_upright
+  4. pick / insert / push of container_bottom
+  5. pick / insert / push of container_top
+
+  max_steps is 4500.
+- **Gripper:** the box is wider than 85 mm on every side, so clamp a wall and slide it. With a top pinch the
+  lower drawer can be held all the way in, because the upper slot is still empty. The upper drawer must be
+  released about 2 cm before the seat and pushed home.
+
+### cabinet
+
+- **Parts:**
+  - **cabinet_body:** 60.5 x 120 x 135 mm plus a 25 mm stud, 131 g. It has two hinge poles (r 3.1 mm) at the
+    front corners, a shelf, and a top plate cut back so the door clips can pass. Its z points to the top end.
+  - **cabinet_door_left / _right:** 30 x 53.75 x 123.75 mm, 30.2 g. Each is a panel with a pull handle and a
+    C-clip on the outer edge: two 1.5 mm jaws (EST) and a 9.5 mm slot around the 6.2 mm pole.
+  - **cabinet_top:** 57.5 x 120 x 30 mm, 60.3 g. A block with a blind 12 mm bore.
+- **Mechanisms:**
+  - **Doors:** one `InsertSpec` per pole.
+    - travel 130 mm: the door is captured 6 mm before the clip reaches the pole tip.
+    - Engage tolerances (EST): 3 mm radial, 4 degrees tilt (it is a 124 mm part), 10 degrees twist.
+    - The door is locked once seated, with no hinge. The design scores a fixed pose, and a free door would
+      swing open when the body is tipped up.
+    - The design's left-door pose is 4.75 mm off its pole, so ours mirrors the right door.
+  - **Top:** an inverted screw on the body's stud.
+    - Thread: 9.375 mm pitch, right-handed (measured), 1.5 turns.
+    - Catch collar r 14 mm, 1.25 mm clear of the doors.
+    - `thread_friction` 0.03 N*m (EST): the long top otherwise springs back off the seat after a fast twist.
+    - A second site rotated 180 degrees accepts the top's other placement. Holes at the same spot share one
+      catch.
+    - The top counts only after **both** doors. The design required only the left one.
+- **Phases:**
+  1. grasp_body
+  2. place_body_corner: the body on its back, top end toward the robot, snug in the +y corner, so the front
+     fence backs it while the doors are pushed on along +W x.
+  3. pick / insert / slide of door_right
+  4. pick / insert / slide of door_left
+  5. grasp_body_flip
+  6. tip_body_upright (body z within 15 degrees of up)
+  7. pick_top
+  8. insert_top
+  9. screw_top
+
+  max_steps is 6000.
+- **Gripper:** pinch the door handles (7.5 mm) top-down. A door lies in the same orientation it has on the
+  lying body. Grasp the top across its 57.5 mm. Pinch a side wall to tip the body up; this is the hardest step.
+
+**Insert spike** (`drive` along the axis from the capture point, 20-40 trials per site and child):
+- Drawer, both slots, both containers: 20/20 seated, with up to 2.5 mm lateral offset and 6 degrees twist, or
+  up to 4 degrees tilt.
+- Doors: 20/20 seated with up to 2.5 mm lateral offset and 6 degrees twist, and 40/40 with up to 3.5 degrees
+  tilt.
+- No child-parent contact while sliding, so the 0.5 mm rail gap and the 1.5 mm jaws hold.
+- Seat error is at most 0.08 mm.
+- With the earlier 8 degrees door tilt tolerance, about 1 in 20 tilted captures flung the door. That is why the
+  tolerance is now 4 degrees.
+
 ## Notes for the Linux collection box
 
 - robosuite 1.4.0 cannot run on the Windows dev laptop: Windows Application Control blocks numba's DLL, and
