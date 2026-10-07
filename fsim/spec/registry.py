@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 from fsim.spec.lamp import LAMP
+from fsim.spec.chair import CHAIR
 from fsim.spec.square_table import ONE_LEG, SQUARE_TABLE
 from fsim.spec.desk import DESK
 from fsim.spec.round_table import ROUND_TABLE
 from fsim.spec.stool import STOOL
 from fsim.spec.types import TaskSpec
 
-TASKS: dict[str, TaskSpec] = {t.name: t for t in (ONE_LEG, SQUARE_TABLE, DESK, ROUND_TABLE, STOOL, LAMP)}
+TASKS: dict[str, TaskSpec] = {t.name: t for t in (ONE_LEG, SQUARE_TABLE, DESK, ROUND_TABLE, STOOL, LAMP, CHAIR)}
 
 
 def get_task(name: str) -> TaskSpec:

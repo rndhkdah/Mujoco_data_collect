@@ -317,6 +317,65 @@ FurnitureBench's meshes.
   - A lying leg balances on the edge of its cylinder and tips 8-10 degrees onto the collar. The design's
     measured presets show the same.
 
+## chair design
+
+Spec: `fsim/spec/chair.py`. Tests: `tests/test_task_chair.py` plus the generic suite. The FurnitureBench meshes
+were measured; the parts here are primitives.
+
+- **Parts** (origin = bounding-box centre of the collision geoms):
+
+| Part | Size (mm) | Mass | Notes |
+|---|---|---|---|
+| `chair_seat` | 100 x 100 x 30 | 61.87 g | open tray, 5 mm floor and 3.75 mm rim; 35 x 30 mm tongue between the studs. Two 25 mm deep holes for the legs (bore r 12.5) in bosses. Two studs, 47 mm long, on the rear edge: r 7.8 shank, then r 6.6 thread (6 mm pitch) |
+| `chair_leg1/2` | 30 x 30 x 60 body + 25 mm stud | 22.44 g | |
+| `chair_back` | 125 x 210 x 30 | 123.16 g | two 30 x 30 posts with 19 mm square through-holes, a 12.5 mm top rail and centre panel; the slot between the posts takes the tongue |
+| `chair_nut1/2` | 30 mm cube | 10.25 g | blind 14.4 mm square bore, 18 mm deep |
+
+- **Mechanisms:**
+  - **Legs:** screwed into the seat holes, 9.375 mm right-handed pitch, as in square_table.
+  - **Back:** an `InsertSpec` along the stud axis.
+    - It engages once both studs are 7 mm into its holes (travel 40 mm) and seats on the stud face.
+    - It is accepted the right way up or turned 180 degrees about the stud axis.
+    - The face-flipped back would need a second child mate. That is not supported, so it does not engage.
+  - **Nuts:** inverted screws (the seat owns the studs), 6 mm pitch.
+    - The site is the nut mouth on the back's top face.
+    - A r 8.2 mm catch collar fits inside the back's holes, so the back slides over it.
+    - Thread friction is 0.004 N*m. The standing chair is not braced by the fence; twisting a nut on turns it
+      less than 0.3 degrees.
+- **Targets:** both legs into either hole, the back, both nuts on either stud.
+  - Tolerance 5 mm on every axis and orientation cosine 0.94.
+  - The nuts count only once the back is in (`requires`, as in the design).
+- **Phases** (17, the design's chair skill count):
+  1. grasp_seat
+  2. place_seat_corner: tray up, studs toward the robot, rear face on the front fence at (0.3215, 0.115), within
+     2.5 cm and 15 degrees of yaw -90
+  3. pick / insert / screw leg1 and leg2
+  4. flip_seat: the studs within 20 degrees of up, released
+  5. pick_back, insert_back (seated)
+  6. pick / insert / screw nut1 and nut2
+- **Why the flip:** the back cannot go on while the seat lies flat, because it would go through the table. So
+  the seat is stood on its rear face, studs up, which is the design's own init-assembled seat pose.
+  - Once the back is on, its centre of mass is past the 30 mm rear face. The chair leans back onto the top rail
+    (about 33 degrees) and rests there, so the nuts go on along a tilted axis.
+  - Standing the seat with the legs away from the robot tilts that axis toward the robot.
+- **Layout and randomization:**
+  - Layout: the design's reset poses. Footprints are its reset rectangles. High: its three measured layouts.
+  - At med, the design's narrower seat range applies (-5..+3.5 cm). It applies it at every level; here it is med only.
+  - med accepts about 1 in 100k layouts, so `max_tries` is 3M.
+- **Estimates and deviations:**
+  - leg pitch 9.375 mm (measured 9.29)
+  - nut pitch unified with the studs at 6 mm (the nut mesh says 5.62)
+  - nut bore 18 mm deep; the design's 15.2 mm bottoms on the stud before the nut reaches the back, which is why
+    the design has both 0.0795 and 0.0815
+  - collision clearances: tongue narrowed to 35 mm, back holes 19 mm square, stud thread r 6.6
+  - the leg-hole female thread radii
+  - the snug corner
+  - max_steps 6000
+- **TODO (`tools/reach_check.py`):** add the chair's snug-corner leg-hole poses, top-down, about z 0.03-0.09:
+  - hole W (0.355, 0.081) and W (0.355, 0.149)
+  - the farthest is about 1 cm beyond square_table's farthest hole
+  - Fall back to the design's corner (seat 2.5 cm off the front fence) if they are not reachable.
+
 ## Screwing: the helical constraint
 
 FurnitureSim screws parts together through thread-on-thread SDF contact in PhysX. MuJoCo would convex-hull

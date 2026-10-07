@@ -239,7 +239,7 @@ class Phase:
     """A phase label and its completion predicate (fsim/sim/phases.py):
       grasp         `part` grasped (without a grasp callback: moved)
       pick          `part` lifted while not known released
-      place_corner  `part` released in the corner extras["corner_xy"], yaw within
+      place_corner  `part` released in the corner extras["corner_xy"], yaw - `yaw_deg` within
                     extras["corner_yaw_tol_deg"] modulo `yaw_sym_deg` (None: no yaw check)
       insert        `part` engaged at a site of `target`, or resting on a screw catch released
       screw / slide `part` seated in `target`'s screw / insert, or (target, part) assembled
@@ -252,6 +252,7 @@ class Phase:
     target: str | None = None
     label: str | None = None
     yaw_sym_deg: float | None = 90.0       # place_corner
+    yaw_deg: float = 0.0                   # place_corner: reference yaw (W, degrees)
     pos: Vec3 | None = None                # place_pose
     pos_tol: float = 0.02
     axis: Vec3 = (0.0, 0.0, 1.0)
